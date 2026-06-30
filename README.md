@@ -270,11 +270,13 @@ Daily report fires at `TG_REPORT_HOUR`:`TG_REPORT_MINUTE` (default 09:00 EET).
 
 ## License
 
-[MIT](./LICENSE) — use freely, no warranty.
+[Proprietary — All Rights Reserved](./LICENSE). Source published for portfolio
+and demonstration purposes only. No personal or commercial use without prior
+written permission.
 
 ---
 
 ## Author
 
-Built by Artem Kalorad. Production system for [Kozyr Trans](https://kozyrtrans-ai.com),
-2026. Open to contract work — `caloradicks@gmail.com`.
+Built by Bohdan Havryliuk. Production system for
+[Kozyr Trans](https://kozyrtrans-ai.com), 2026.
