@@ -1,0 +1,40 @@
+# --- secrets / env ---
+.env
+.env.local
+.env.bak.*
+*.bak
+secrets/
+*.pem
+*.key
+
+# --- python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# --- tooling caches ---
+.idea/
+.vscode/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# --- data / runtime ---
+*.db
+local.db
+.cache/
+pgdata/
+scraped_resumes.json
+*.log
+logs/
+
+# --- OS ---
+.DS_Store
+Thumbs.db

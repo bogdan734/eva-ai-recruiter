@@ -1,0 +1,58 @@
+[project]
+name = "ai-recruiter"
+version = "0.1.0"
+description = "Voice AI HR pipeline: work.ua -> KeyCRM -> Vapi -> Telegram report"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "pydantic>=2.9",
+  "pydantic-settings>=2.6",
+  "httpx>=0.28",
+  "anthropic>=0.40",
+  "openai>=1.55",
+  "deepgram-sdk>=3.7",
+  "elevenlabs>=1.10",
+  "playwright>=1.49",
+  "python-telegram-bot>=21.7",
+  "apscheduler>=3.10",
+  "sqlalchemy[asyncio]>=2.0",
+  "asyncpg>=0.30",
+  "aiosqlite>=0.20",
+  "alembic>=1.14",
+  "psycopg2-binary>=2.9",
+  "structlog>=24.4",
+  "phonenumbers>=8.13",
+  "tenacity>=9.0",
+  "rich>=13.9",
+  "boto3>=1.35",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "pytest-cov>=6.0",
+  "ruff>=0.8",
+  "mypy>=1.13",
+  "pre-commit>=4.0",
+  "respx>=0.21",
+  "freezegun>=1.5",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "PL"]
+ignore = ["PLR0913", "PLR2004"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

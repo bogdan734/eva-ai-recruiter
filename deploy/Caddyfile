@@ -1,0 +1,26 @@
+{
+    email admin@kozyrtrans-ai.com
+}
+
+api.kozyrtrans-ai.com {
+    reverse_proxy api:8000
+    encode gzip
+    log {
+        output stdout
+        format json
+    }
+}
+
+webhooks.kozyrtrans-ai.com {
+    reverse_proxy api:8000
+    encode gzip
+    log {
+        output stdout
+        format json
+    }
+}
+
+bot.kozyrtrans-ai.com {
+    reverse_proxy bot:8001
+    encode gzip
+}
