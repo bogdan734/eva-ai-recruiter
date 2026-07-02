@@ -62,6 +62,24 @@ def _save_cursor(state: dict[str, Any]) -> None:
     CURSOR_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _allowed_vacancy_ids() -> set[int]:
+    """Parse WORKUA_ALLOWED_VACANCY_IDS csv env var. Empty = allow all."""
+    import os
+    raw = (os.getenv("WORKUA_ALLOWED_VACANCY_IDS") or "").strip()
+    if not raw:
+        return set()
+    out: set[int] = set()
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            out.add(int(tok))
+        except ValueError:
+            log.warning("workua.bad_vacancy_id_in_env", token=tok)
+    return out
+
+
 async def poll_responses(
     *,
     client: WorkUaClient | None = None,
@@ -71,6 +89,10 @@ async def poll_responses(
 ) -> PollStats:
     """Pull new responses since last_id and feed them through InboundRouter.
 
+    Filters by WORKUA_ALLOWED_VACANCY_IDS (csv of job_ids) — responses to any
+    other vacancy (e.g. the client's bookkeeper posting) are skipped so the
+    inbound funnel stays scoped to the target role.
+
     Idempotent: re-running with the same last_id is safe; router dedupes by phone.
     """
     client = client or WorkUaClient()
@@ -78,12 +100,28 @@ async def poll_responses(
     stats = PollStats()
     cursor = _load_cursor()
     last_id: int | None = cursor.get("responses_last_id")
+    allowed_vacancies = _allowed_vacancy_ids()
 
     try:
-        types = ["send", "phonecall"] if include_phonecalls else ["send"]
-        page = await client.list_responses(
-            limit=page_size, last_id=last_id, sort=1, from_types=types
-        )
+        if allowed_vacancies:
+            # Per-vacancy endpoint returns only Відгуки for the given job — no
+            # noise from historical vacancies. Merge results across allowed IDs.
+            merged: list[dict] = []
+            for vid in sorted(allowed_vacancies):
+                try:
+                    r = await client.list_responses_for_vacancy(
+                        vid, limit=page_size, last_id=last_id
+                    )
+                    merged.extend(r.get("items") or [])
+                except (WorkUaApiError, WorkUaAuthError) as e:
+                    log.warning("workua.vacancy_fetch_failed", vid=vid, error=str(e))
+                    stats.errors += 1
+            page = {"items": merged}
+        else:
+            types = ["send", "phonecall"] if include_phonecalls else ["send"]
+            page = await client.list_responses(
+                limit=page_size, last_id=last_id, sort=1, from_types=types
+            )
     except WorkUaAuthError as e:
         log.error("workua.auth_error", error=str(e))
         stats.errors += 1
@@ -114,6 +152,16 @@ async def poll_responses(
 
         if resp.id > max_seen_id:
             max_seen_id = resp.id
+
+        if allowed_vacancies and resp.job_id not in allowed_vacancies:
+            stats.rejected += 1
+            log.info(
+                "workua.vacancy_filtered",
+                id=resp.id,
+                job_id=resp.job_id,
+                allowed=sorted(allowed_vacancies),
+            )
+            continue
 
         if not resp.phone:
             stats.rejected += 1
@@ -150,7 +198,7 @@ async def poll_responses(
                 region_raw=None,
                 desired_position=None,
                 source=f"workua_response_{resp.from_type}",
-                vacancy_id=1,  # default local vacancy_id; work.ua id in raw payload
+                vacancy_id=1,  # local FK; work.ua job_id lives in raw payload
             )
         )
         if not result.accepted:
