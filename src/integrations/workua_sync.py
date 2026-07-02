@@ -150,7 +150,7 @@ async def poll_responses(
                 region_raw=None,
                 desired_position=None,
                 source=f"workua_response_{resp.from_type}",
-                vacancy_id=resp.job_id,
+                vacancy_id=1,  # default local vacancy_id; work.ua id in raw payload
             )
         )
         if not result.accepted:

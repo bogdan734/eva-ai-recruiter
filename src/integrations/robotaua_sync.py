@@ -1,20 +1,23 @@
-"""robota.ua → KeyCRM sync — STUB.
+"""robota.ua → KeyCRM sync via Playwright scraper.
 
-Mirrors the work.ua sync flow:
+Mirrors the work.ua flow:
   1. poll new applications since cursor
   2. normalize each to ProviderResponse
-  3. push through InboundRouter
+  3. push through InboundRouter (dedup by phone)
   4. advance cursor
 
-Cursor file: `.cache/robotaua_cursor.json` (gitignored).
+Only responses under the "Відгуки" tab are ingested — "Відкрив контакти"
+and "Додав в обране" and vacancy views are filtered upstream in
+`RobotaUaClient.list_new_applications`.
 
-Wire-up: once `ROBOTAUA_API_TOKEN` is set in `.env`, the scheduler will
-register this provider's `poll_responses` job at the same 5-min cadence
-as work.ua.
+Cursor file: `.cache/robotaua_cursor.json` (gitignored, ephemeral in Docker
+containers; consider mounting a volume if durability across restarts is
+important — but router dedup by phone_e164 makes cursor loss cheap).
 """
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import structlog
@@ -28,9 +31,24 @@ log = structlog.get_logger()
 CURSOR_PATH = Path(".cache/robotaua_cursor.json")
 
 
+def _allowed_vacancy_ids() -> set[int]:
+    raw = (os.getenv("ROBOTAUA_ALLOWED_VACANCY_IDS") or "").strip()
+    if not raw:
+        return set()
+    out: set[int] = set()
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if tok:
+            try:
+                out.add(int(tok))
+            except ValueError:
+                log.warning("robotaua.bad_vacancy_id_in_env", token=tok)
+    return out
+
+
 class RobotaUaProvider(JobBoardProvider):
     name = "robotaua"
-    required_env = ("ROBOTAUA_API_TOKEN",)
+    required_env = ("ROBOTAUA_EMPLOYER_EMAIL", "ROBOTAUA_EMPLOYER_PASSWORD")
 
     def __init__(
         self,
@@ -54,11 +72,13 @@ class RobotaUaProvider(JobBoardProvider):
 
     async def poll_responses(self) -> PollResult:
         result = PollResult(provider=self.name)
-        client = self._client or RobotaUaClient()
+        client = self._client or RobotaUaClient(
+            allowed_vacancy_ids=_allowed_vacancy_ids()
+        )
         try:
             applications = await client.list_new_applications(since_id=self._load_cursor())
         except NotImplementedError:
-            log.info("robotaua.poll.skipped", reason="api_not_yet_implemented")
+            log.info("robotaua.poll.skipped", reason="scraper_not_activated")
             return result
         except Exception as e:
             log.error("robotaua.poll.failed", error=str(e))

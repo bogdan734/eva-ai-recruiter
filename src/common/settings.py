@@ -51,9 +51,13 @@ class Settings(BaseSettings):
     workua_employer_password: str = ""
     workua_scrape_daily_limit: int = 50
     workua_proxy_url: str = ""
+    workua_allowed_vacancy_ids: str = ""
 
     # Pluggable job board providers (stubs — fill keys to enable).
     robotaua_api_token: str = ""
+    robotaua_employer_email: str = ""
+    robotaua_employer_password: str = ""
+    robotaua_allowed_vacancy_ids: str = ""
     jooble_api_key: str = ""
     olx_jobs_client_id: str = ""
     olx_jobs_client_secret: str = ""

@@ -170,8 +170,8 @@ async def cmd_test_call(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         args = c.args or []
         if not args:
             await u.message.reply_text(
-                "Використання: `/test_call +380XXXXXXXXX`",
-                parse_mode=ParseMode.MARKDOWN,
+                "Використання: <code>/test_call +380XXXXXXXXX</code>",
+                parse_mode=ParseMode.HTML,
             )
             return
         phone = args[0].strip()
@@ -188,9 +188,9 @@ async def cmd_test_call(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             call_id = res.get("id", "?")
             await u.message.reply_text(
                 f"📞 Тестовий дзвінок ініційовано\n"
-                f"call_id: `{call_id}`\n"
-                f"номер: `{phone}`",
-                parse_mode=ParseMode.MARKDOWN,
+                f"call_id: <code>{call_id}</code>\n"
+                f"номер: <code>{phone}</code>",
+                parse_mode=ParseMode.HTML,
             )
         finally:
             await vapi.aclose()

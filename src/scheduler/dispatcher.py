@@ -83,29 +83,7 @@ def build_scheduler() -> AsyncIOScheduler:
         id="workua_poll",
         replace_existing=True,
     )
-    # Pluggable job board providers (robota.ua, OLX Jobs, ...) — share cadence.
-    from src.integrations.registry import enabled_providers
-    for provider in enabled_providers():
-        scheduler.add_job(
-            _wrap_provider_poll(provider),
-            trigger=CronTrigger(minute="*/5"),
-            id=f"{provider.name}_poll",
-            replace_existing=True,
-        )
     return scheduler
-
-
-def _wrap_provider_poll(provider):
-    async def _run():
-        try:
-            stats = await provider.poll_responses()
-            log.info(
-                "%s.poll stats fetched=%d accepted=%d duplicates=%d errors=%d",
-                provider.name, stats.fetched, stats.accepted, stats.duplicates, stats.errors,
-            )
-        except Exception as e:
-            log.exception("%s.poll_failed: %s", provider.name, e)
-    return _run
 
 
 async def _main() -> None:
