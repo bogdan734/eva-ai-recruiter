@@ -1,16 +1,25 @@
-"""Inbound lead router — production version against live Kozyr Trans KeyCRM.
+"""Inbound lead router.
+
+Two modes controlled by DEFER_KEYCRM_UNTIL_QUALIFIED env (default: on):
+
+  - deferred (default): only writes a local Candidate. KeyCRM lead is
+    created later by the orchestrator's post-call `_finalize_call` after
+    Єва's screening produces a decision. This keeps the CRM clean —
+    only candidates who actually spoke with Єва land in the funnel.
+
+  - eager (legacy): creates KeyCRM lead immediately on inbound. Kept for
+    fallback if a client wants CRM to mirror raw work.ua activity.
 
 Pipeline:
 1. Normalize phone to E.164
 2. Region pre-filter (whitelist + blacklist)
-3. Dedup: check local DB and KeyCRM by phone
-4. If duplicate — annotate, do not create new card
-5. If fresh — create KeyCRM lead in funnel 1 status 1 ("Новий") with:
-   - existing fields LD_1001..LD_1004 filled where applicable
-   - manager_comment carries AI metadata (source, match_score, region etc)
+3. Dedup: check local DB and (in eager mode) KeyCRM by phone
+4. Insert local Candidate
+5. If eager mode — create KeyCRM lead and store lead_id on candidate
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -28,6 +37,13 @@ from src.common.models import Candidate, CandidateStatus
 from src.common.phone import normalize_phone
 from src.common.regions import is_region_allowed, normalize_region
 from src.common.settings import get_settings
+
+
+def _defer_keycrm() -> bool:
+    """When True, InboundRouter skips KeyCRM POST at ingest — the lead is
+    created later by the orchestrator after the qualifying call."""
+    raw = (os.getenv("DEFER_KEYCRM_UNTIL_QUALIFIED") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off", "")
 
 log = structlog.get_logger()
 
@@ -126,7 +142,22 @@ class InboundRouter:
             await session.flush()
             new_candidate_id = candidate.id
 
-        # Remote dedup as second guard
+        # Deferred mode: skip KeyCRM entirely at ingest. Orchestrator will
+        # create the lead post-call when Єва has a qualified verdict.
+        if _defer_keycrm():
+            log.info(
+                "inbound.local_only",
+                candidate_id=new_candidate_id,
+                phone=phone[:6] + "***",
+                source=payload.source,
+            )
+            return IngestResult(
+                accepted=True,
+                candidate_id=new_candidate_id,
+                reason="deferred_until_qualified",
+            )
+
+        # Eager mode — original behaviour.
         try:
             remote = await self._keycrm.find_lead_by_phone(phone)
         except Exception as e:
