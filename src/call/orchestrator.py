@@ -281,12 +281,40 @@ class CallOrchestrator:
                 candidate.status = CandidateStatus.IN_CALL_QUEUE
                 new_stage = STAGE_MAP.get("in_call_queue")
 
+            # Deferred-KeyCRM mode: create the lead now that we have a
+            # verdict, then set the stage to match. Skip creation on clear
+            # non-signals (no answer + retry left) — that just retries later.
+            if not candidate.keycrm_lead_id:
+                should_push = summary.qualified or (
+                    candidate.call_attempts >= self._settings.call_max_attempts
+                )
+                if should_push:
+                    try:
+                        created = await self._keycrm.create_lead(
+                            title=candidate.full_name,
+                            full_name=candidate.full_name,
+                            phone=candidate.phone_e164,
+                            email=candidate.email,
+                            vacancy_name=(vacancy.title if vacancy else "Менеджер з продажу"),
+                            manager_comment=(
+                                f"джерело: {candidate.source} | "
+                                f"AI verdict: {'qualified' if summary.qualified else 'unreached'} | "
+                                f"attempts: {candidate.call_attempts} | "
+                                f"summary: {(summary.summary or '')[:400]}"
+                            ),
+                        )
+                        candidate.keycrm_lead_id = int(created.get("id") or 0) or None
+                    except Exception as e:
+                        log.warning(
+                            "orchestrator.keycrm_create_failed",
+                            error=str(e),
+                            candidate_id=candidate.id,
+                        )
+
             if candidate.keycrm_lead_id and new_stage:
                 try:
-                    await self._keycrm.move_stage(
-                        self._settings.keycrm_funnel_id,
-                        candidate.keycrm_lead_id,
-                        new_stage,
+                    await self._keycrm.move_to_status(
+                        candidate.keycrm_lead_id, new_stage
                     )
                 except Exception as e:
                     log.warning("orchestrator.keycrm_move_failed", error=str(e))

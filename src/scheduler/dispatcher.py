@@ -31,7 +31,12 @@ async def run_slot() -> None:
         q = await session.execute(
             select(Candidate)
             .where(
-                Candidate.status == CandidateStatus.IN_CALL_QUEUE,
+                Candidate.status.in_(
+                    (
+                        CandidateStatus.NEW_RESUME,
+                        CandidateStatus.IN_CALL_QUEUE,
+                    )
+                ),
                 Candidate.call_attempts < s.call_max_attempts,
             )
             .order_by(Candidate.match_score.desc().nulls_last(), Candidate.created_at)
