@@ -37,9 +37,7 @@ STATE_PATH = os.environ.get("TG_STATE_PATH", "eva_state.json")
 client = TelegramClient(os.environ.get("TG_SESSION", "eva_session"), API_ID, API_HASH)
 claude = Anthropic()
 
-# recruiter/manager handoff phone shown when a candidate wants a live person / a call
-HANDOFF_PHONE = os.environ.get("HANDOFF_PHONE", "(номер уточнюється)")
-SYSTEM_PROMPT = _BASE_PROMPT.replace("{HANDOFF_PHONE}", HANDOFF_PHONE)
+SYSTEM_PROMPT = _BASE_PROMPT
 
 
 # ------------------------------ runtime state ------------------------------
