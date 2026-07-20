@@ -1,0 +1,123 @@
+{
+  "_comment": "Vapi.ai assistant config template. Placeholders in {{double_braces}} are filled at deploy time from .env or call-context.",
+  "name": "AI Recruiter — {{vacancy_name}}",
+  "firstMessage": "Доброго дня! Мене звати {{agent_persona_name}}, я HR-асистент компанії {{company_name}}. Цей дзвінок записується для якості обслуговування. Якщо ви проти запису, скажіть і я завершу розмову. У вас зараз є кілька хвилин поговорити?",
+  "firstMessageMode": "assistant-speaks-first",
+  "voice": {
+    "provider": "11labs",
+    "voiceId": "{{elevenlabs_voice_id}}",
+    "model": "eleven_flash_v2_5",
+    "stability": 0.5,
+    "similarityBoost": 0.75,
+    "useSpeakerBoost": true,
+    "optimizeStreamingLatency": 3
+  },
+  "transcriber": {
+    "provider": "deepgram",
+    "model": "nova-3",
+    "language": "multi",
+    "smartFormat": true,
+    "endpointing": 300,
+    "punctuate": true
+  },
+  "model": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "temperature": 0.4,
+    "maxTokens": 250,
+    "systemPrompt": "{{system_prompt_from_call_script_md}}",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "update_call_state",
+          "description": "Move to the next FSM step in the call script",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "step": {"type": "integer", "minimum": 1, "maximum": 6},
+              "qualified": {"type": "boolean"},
+              "objection_raised": {
+                "type": "string",
+                "enum": ["distance", "salary", "timing", "field", "current_job", "other", "none"]
+              },
+              "language_detected": {"type": "string", "enum": ["uk", "ru", "en", "mixed"]}
+            },
+            "required": ["step"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "transfer_to_manager",
+          "description": "Mark candidate as qualified and ready for manager handoff",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "summary": {"type": "string", "description": "3-bullet summary of qualifications"},
+              "best_callback_time": {"type": "string"}
+            },
+            "required": ["summary"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "schedule_callback",
+          "description": "Candidate requested a callback at a later time",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "when": {"type": "string", "format": "date-time"},
+              "reason": {"type": "string"}
+            },
+            "required": ["when"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "soft_exit",
+          "description": "End call politely due to: aggression, repetition, forbidden topic, or candidate refusal",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": ["aggressive", "repetitive", "forbidden_topic", "candidate_refused", "consent_denied"]
+              }
+            },
+            "required": ["reason"]
+          }
+        }
+      }
+    ]
+  },
+  "endCallFunctionEnabled": true,
+  "endCallMessage": "Дякую за приділений час, гарного дня!",
+  "endCallPhrases": ["до побачення", "до зустрічі", "бувайте"],
+  "recordingEnabled": true,
+  "hipaaEnabled": false,
+  "maxDurationSeconds": 420,
+  "silenceTimeoutSeconds": 20,
+  "responseDelaySeconds": 0.4,
+  "llmRequestDelaySeconds": 0.1,
+  "numWordsToInterruptAssistant": 2,
+  "backgroundSound": "off",
+  "backchannelingEnabled": true,
+  "fillerInjectionEnabled": true,
+  "modelOutputInMessagesEnabled": true,
+  "serverUrl": "https://webhooks.recruiter-ai.example.com/vapi/events",
+  "serverUrlSecret": "{{vapi_webhook_secret}}",
+  "serverMessages": [
+    "end-of-call-report",
+    "status-update",
+    "hang",
+    "function-call",
+    "transcript",
+    "tool-calls"
+  ]
+}

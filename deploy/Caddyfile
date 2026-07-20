@@ -1,0 +1,13 @@
+{
+    email admin@kozyrtrans-ai.com
+}
+
+api.kozyrtrans-ai.com {
+    reverse_proxy api:8000
+    encode gzip
+}
+
+webhooks.kozyrtrans-ai.com {
+    reverse_proxy api:8000
+    encode gzip
+}

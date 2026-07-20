@@ -1,0 +1,12 @@
+.env
+.env.*
+*.bak-*
+*.bak
+__pycache__/
+*.pyc
+state/
+data/
+_trash_*/
+debug-*/
+*.log
+tg_userbot/data/

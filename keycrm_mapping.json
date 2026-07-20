@@ -1,0 +1,46 @@
+{
+  "funnel": {
+    "id": 1,
+    "title": "1 Етап Менеджер з продажу"
+  },
+  "manager_default": {
+    "id": 3,
+    "name": "Svitlana Kozyrtrans",
+    "email": "kozyrtranshrmanager@gmail.com"
+  },
+  "statuses": {
+    "1": {"name": "Новий", "color": "#69DB7C", "is_final": false, "purpose": "default for newly-created"},
+    "2": {"name": "Відібрано", "color": "#FFD43A", "is_final": false, "purpose": "after AI qualified — manager review"},
+    "4": {"name": "Дійшов на 1 тур", "color": "#309E45", "is_final": true, "purpose": "interview happened (success)"},
+    "32": {"name": "Не актуально", "color": "#E03031", "is_final": true, "purpose": "candidate not interested"},
+    "33": {"name": "Не підходить нам", "color": "#E03031", "is_final": true, "purpose": "we rejected"},
+    "34": {"name": "Не ЦА", "color": "#E03031", "is_final": true, "purpose": "blacklist region/role/age etc"}
+  },
+  "custom_fields_existing": {
+    "1": {"uuid": "LD_1001", "name": "Вакансія", "type": "select"},
+    "2": {"uuid": "LD_1002", "name": "Номер вакансії", "type": "text"},
+    "3": {"uuid": "LD_1003", "name": "Опис вакансії", "type": "textarea"},
+    "4": {"uuid": "LD_1004", "name": "Посилання на вакансію", "type": "link"},
+    "5": {"uuid": "LD_1005", "name": "AI Аудіо", "type": "link", "added": "2026-06-23"},
+    "6": {"uuid": "LD_1006", "name": "AI Транскрипт", "type": "text", "added": "2026-06-23"},
+    "7": {"uuid": "LD_1007", "name": "AI Summary", "type": "text", "added": "2026-06-23"},
+    "8": {"uuid": "LD_1008", "name": "AI Match Score", "type": "integer", "added": "2026-06-23"},
+    "9": {"uuid": "LD_1009", "name": "AI Регіон", "type": "text", "added": "2026-06-23"}
+  },
+  "field_mapping_internal_to_keycrm": {
+    "_comment": "How our internal candidate fields map to KeyCRM. Until more custom fields are created in UI, we pack everything into existing 4 + manager_comment.",
+    "vacancy_title": "custom_field:LD_1001 (Вакансія)",
+    "workua_response_id": "custom_field:LD_1002 (Номер вакансії)",
+    "resume_text": "custom_field:LD_1003 (Опис вакансії)",
+    "work_ua_url": "custom_field:LD_1004 (Посилання на вакансію)",
+    "ai_summary_and_metadata": "manager_comment (multi-line markdown)"
+  },
+  "lead_lifecycle": {
+    "stage_new": 1,
+    "stage_qualified_by_ai": 2,
+    "stage_manager_interview_done": 4,
+    "stage_not_interested": 32,
+    "stage_we_rejected": 33,
+    "stage_blacklisted_by_ai": 34
+  }
+}
