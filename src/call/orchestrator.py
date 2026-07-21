@@ -360,6 +360,15 @@ class CallOrchestrator:
                             candidate_id=candidate.id,
                         )
 
+            # Flag the lead as AI-handled by making "Єва АІ" the responsible
+            # manager — recruiters can then spot these in the list at a glance.
+            ai_manager = self._settings.keycrm_ai_manager_id
+            if candidate.keycrm_lead_id and ai_manager:
+                try:
+                    await self._keycrm.assign_manager(candidate.keycrm_lead_id, ai_manager)
+                except Exception as e:
+                    log.warning("orchestrator.keycrm_assign_failed", error=str(e))
+
             # Put the conversation itself on the card — summary, transcript,
             # recording — otherwise the recruiter opens a lead with no context.
             if candidate.keycrm_lead_id:

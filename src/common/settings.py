@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     # Persona + vacancy defaults (Kozyr Trans)
     agent_name: str = "Єва"
     tguserbot_url: str = "http://tguserbot:8090"
+    # KeyCRM user assigned to every AI-processed lead so recruiters can
+    # tell them apart in the list. 0 disables the assignment.
+    keycrm_ai_manager_id: int = 7
     company_name: str = "Kozyr Trans"
     company_pitch: str = (
         "Ми займаємося організацією внутрішніх та міжнародних вантажоперевезень."

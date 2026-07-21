@@ -173,6 +173,10 @@ class KeyCRMClient:
             return {}
         return await self.update_lead(lead_id, {"custom_fields": custom})
 
+    async def assign_manager(self, lead_id: int, manager_id: int) -> dict[str, Any]:
+        """Set the responsible user — used to flag AI-handled leads."""
+        return await self.update_lead(lead_id, {"manager_id": manager_id})
+
     async def append_manager_comment(self, lead_id: int, addition: str) -> dict[str, Any]:
         r = await self._client.get(f"/pipelines/cards/{lead_id}")
         r.raise_for_status()
