@@ -50,6 +50,14 @@ async def main() -> None:
             "temperature": 0.4,
             "messages": [{"role": "system", "content": inbound_prompt}],
         },
+        "endCallPhrases": [
+            "гарного дня",
+            "бажаємо вам успіхів",
+            "успіхів у пошуку роботи",
+            "до побачення",
+            "до зустрічі",
+            "бувайте",
+        ],
         "firstMessage": "… Алло! Добрий день!",
         "firstMessageMode": "assistant-speaks-first",
         # 120s + idle re-prompts: mitigation for Telnyx WS media-fork bug
