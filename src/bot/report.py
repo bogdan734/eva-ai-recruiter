@@ -169,6 +169,21 @@ async def collect_for(target: date) -> DayReport:
         rep.funnel_rejected = g(CandidateStatus.CLOSED)
         rep.funnel_unreachable = g(CandidateStatus.UNREACHABLE)
 
+        # People dialled today who are still queued for another attempt — they
+        # were not lost, they carried over to the next day.
+        rep.carried_over = (await session.execute(
+            select(func.count(func.distinct(Candidate.id)))
+            .select_from(Candidate)
+            .join(Call, Call.candidate_id == Candidate.id)
+            .where(
+                func.date(Call.started_at) == target,
+                Candidate.status.in_((
+                    CandidateStatus.IN_CALL_QUEUE,
+                    CandidateStatus.NEW_RESUME,
+                )),
+            )
+        )).scalar() or 0
+
     # ---- spend, computed from what actually happened ----
     minutes = rep.total_in_line_sec / 60
     p = PRICING
@@ -248,6 +263,10 @@ def format_report_md(rep: DayReport) -> str:
         f"├ ⭐ У рекрутера: {rep.funnel_manager}\n"
         f"├ Не підійшли: {rep.funnel_rejected}\n"
         f"└ Недозвон: {rep.funnel_unreachable}\n"
+        + (f"\n🔁 *Перенесено на завтра: {rep.carried_over}*\n"
+           "└ не додзвонились або розмова не вийшла — наберемо ще раз\n"
+           if rep.carried_over else "")
+        +
         f"{qualified_block}"
     )
 
