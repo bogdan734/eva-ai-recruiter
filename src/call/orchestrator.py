@@ -418,6 +418,12 @@ class CallOrchestrator:
                         if new_id:
                             candidate.keycrm_lead_id = new_id
                             await self._keycrm.move_to_status(new_id, new_stage)
+                            # KeyCRM stamps its own default manager on creation —
+                            # re-assign so the lead still reads as AI-handled.
+                            if self._settings.keycrm_ai_manager_id:
+                                await self._keycrm.assign_manager(
+                                    new_id, self._settings.keycrm_ai_manager_id
+                                )
                             log.info(
                                 "orchestrator.keycrm_lead_recreated",
                                 candidate_id=candidate.id,
