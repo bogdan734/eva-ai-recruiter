@@ -299,6 +299,28 @@ class CallOrchestrator:
 
         db_call.status = CallStatus.SUCCESS if summary.qualified else CallStatus.HANGUP
 
+        # Unreachable by phone -> reach out in Telegram instead.
+        if needs_tg_outreach and candidate and candidate.phone_e164:
+            try:
+                async with httpx.AsyncClient(timeout=20) as tg:
+                    r = await tg.post(
+                        f"{self._settings.tguserbot_url}/send_outreach",
+                        json={
+                            "phone": candidate.phone_e164,
+                            "name": candidate.full_name or "",
+                            "kind": needs_tg_outreach,
+                        },
+                    )
+                    log.info(
+                        "orchestrator.tg_outreach",
+                        kind=needs_tg_outreach,
+                        status=r.status_code,
+                        resp=r.text[:200],
+                        candidate_id=candidate.id,
+                    )
+            except Exception as e:
+                log.warning("orchestrator.tg_outreach_failed", error=str(e))
+
         # Cold-base promise fulfilment: Єва pledged to send the anketa in Telegram.
         if summary.needs_anketa and candidate and candidate.phone_e164:
             try:
@@ -319,6 +341,7 @@ class CallOrchestrator:
             except Exception as e:
                 log.warning("orchestrator.anketa_form_failed", error=str(e))
 
+        needs_tg_outreach: str | None = None
         if candidate:
             if summary.qualified:
                 candidate.status = CandidateStatus.MANAGER_REVIEW
@@ -335,6 +358,12 @@ class CallOrchestrator:
             elif candidate.call_attempts >= self._settings.call_max_attempts:
                 candidate.status = CandidateStatus.UNREACHABLE
                 new_stage = STAGE_MAP.get("unreachable")
+                # Phone did not work out — try Telegram instead. A plain
+                # no-answer gets the work number too; a broken line does not
+                # (calling again would fail the same way).
+                needs_tg_outreach = (
+                    "bad_connection" if summary.connection_problem else "no_answer"
+                )
             else:
                 candidate.status = CandidateStatus.IN_CALL_QUEUE
                 # Do NOT touch the CRM stage for someone we have not actually

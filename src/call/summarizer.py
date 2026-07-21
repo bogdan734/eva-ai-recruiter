@@ -31,6 +31,9 @@ You must return ONLY a tool call to summarize_call with these fields:
   - language: uk | ru | en | mixed
   - qualified: true if candidate meets vacancy requirements AND wants to proceed
   - candidate_age: the age in years the candidate stated during the call, else null
+  - connection_problem: true if the call connected but the two sides could not hear
+    each other (candidate repeats 'алло', says they cannot hear, line noise/silence
+    while both are present). False for a plain no-answer or voicemail.
   - spoke_with_candidate: true ONLY if the candidate ANSWERED AT LEAST ONE screening
     question about themselves (experience, city, age, current job or availability).
     Greeting the agent, confirming their name, or listening to the pitch is NOT enough.
@@ -68,6 +71,7 @@ _TOOL = {
             "qualified": {"type": "boolean"},
             "candidate_age": {"type": ["integer", "null"]},
             "spoke_with_candidate": {"type": "boolean"},
+            "connection_problem": {"type": "boolean"},
             "needs_anketa": {"type": "boolean"},
             "best_callback_time": {"type": ["string", "null"]},
         },
@@ -86,6 +90,7 @@ class CallSummary:
     needs_anketa: bool = False
     candidate_age: int | None = None
     spoke_with_candidate: bool = False
+    connection_problem: bool = False
     best_callback_time: str | None = None
     tokens_in: int = 0
     tokens_out: int = 0
@@ -133,6 +138,7 @@ class Summarizer:
                     needs_anketa=bool(d.get("needs_anketa", False)),
                     candidate_age=d.get("candidate_age"),
                     spoke_with_candidate=bool(d.get("spoke_with_candidate", False)),
+                    connection_problem=bool(d.get("connection_problem", False)),
                     best_callback_time=d.get("best_callback_time"),
                     tokens_in=resp.usage.input_tokens,
                     tokens_out=resp.usage.output_tokens,

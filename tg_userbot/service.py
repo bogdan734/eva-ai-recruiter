@@ -121,6 +121,98 @@ async def do_send_form(phone: str, name: str) -> dict:
     return {"ok": True, "sent_to": phone, "peer_id": entity.id}
 
 
+
+WORK_PHONE = os.environ.get("WORK_PHONE", "+380935824369")
+
+OUTREACH_NO_ANSWER = (
+    "Доброго дня{name_part}! Мене звати Єва, я помічниця рекрутера компанії "
+    "Козир Транс — організація вантажоперевезень.\n\n"
+    "Ми телефонували вам щодо вакансії менеджера з продажу логістики, але не "
+    "змогли додзвонитися. Умови: повна зайнятість, стовідсотково віддалено, "
+    "дохід від тридцяти до шістдесяти п'яти тисяч гривень і вище.\n\n"
+    "Якщо вакансія цікава — можемо поспілкуватися тут у чаті, або "
+    "зателефонуйте нам на {phone}. Як вам зручніше?"
+)
+
+OUTREACH_BAD_CONNECTION = (
+    "Доброго дня{name_part}! Мене звати Єва, я помічниця рекрутера компанії "
+    "Козир Транс — організація вантажоперевезень.\n\n"
+    "Ми щойно спілкувалися телефоном, але зв'язок був поганий і ми не почули "
+    "одне одного. Пропоную продовжити тут, у чаті — так буде надійніше.\n\n"
+    "Вакансія: менеджер з продажу логістики, повна зайнятість, стовідсотково "
+    "віддалено, дохід від тридцяти до шістдесяти п'яти тисяч гривень і вище.\n\n"
+    "Підкажіть, будь ласка, вам цікаво?"
+)
+
+OUTREACH_TEMPLATES = {
+    "no_answer": OUTREACH_NO_ANSWER,
+    "bad_connection": OUTREACH_BAD_CONNECTION,
+}
+
+
+async def do_send_outreach(phone: str, name: str, kind: str) -> dict:
+    """Message someone we failed to reach by phone."""
+    tpl = OUTREACH_TEMPLATES.get(kind)
+    if not tpl:
+        return {"ok": False, "error": f"unknown kind: {kind}"}
+    if not STATE.get("active", True):
+        return {"ok": False, "error": "Розсилку поставлено на паузу"}
+    limit = int(STATE.get("limit", 15))
+    if store.sent_today() >= limit:
+        return {"ok": False, "error": f"Денний ліміт {limit} вичерпано"}
+
+    phone = phone.strip()
+    if not phone:
+        return {"ok": False, "error": "no phone"}
+    if not phone.startswith("+"):
+        phone = "+" + phone
+
+    entity, imported = None, False
+    try:
+        entity = await client.get_entity(phone)
+    except Exception:
+        entity = None
+    if entity is None:
+        try:
+            res = await client(ImportContactsRequest(contacts=[
+                InputPhoneContact(client_id=0, phone=phone,
+                                  first_name=name or "Кандидат", last_name="")]))
+            if res.users:
+                entity, imported = res.users[0], True
+        except Exception as e:
+            return {"ok": False, "error": f"import failed: {e}"}
+    if entity is None:
+        return {"ok": False, "error": "номер не в Telegram або приховує телефон"}
+
+    peer = str(entity.id)
+    if store.already_contacted(peer):
+        return {"ok": False, "error": "Вже писали цьому кандидату (анти-спам)"}
+
+    first = (name or "").split()[0] if name else ""
+    text = tpl.format(name_part=f", {first}" if first else "", phone=WORK_PHONE)
+    try:
+        await human_typing(entity, text)
+        await client.send_message(entity, text)
+    except PeerFloodError:
+        STATE["active"] = False
+        _save_state(STATE)
+        return {"ok": False, "error": "PeerFloodError — акаунт обмежено"}
+    except UserPrivacyRestrictedError:
+        return {"ok": False, "error": "приватність: не приймає повідомлення"}
+    except FloodWaitError as e:
+        return {"ok": False, "error": f"FloodWait {e.seconds}s"}
+    finally:
+        if imported:
+            try:
+                await client(DeleteContactsRequest(id=[entity]))
+            except Exception:
+                pass
+
+    store.mark_contacted(peer, name or phone)
+    store.log_message(peer, "assistant", text)
+    return {"ok": True, "kind": kind, "sent_to": phone, "sent_today": store.sent_today()}
+
+
 async def do_send(target: str, name: str) -> dict:
     if not STATE.get("active", True):
         return {"ok": False, "error": "Розсилку поставлено на паузу"}
@@ -184,6 +276,16 @@ async def h_send_form(request):
     return web.json_response(res)
 
 
+async def h_send_outreach(request):
+    body = await request.json()
+    res = await do_send_outreach(
+        str(body.get("phone", "")).strip(),
+        str(body.get("name", "")).strip(),
+        str(body.get("kind", "")).strip(),
+    )
+    return web.json_response(res)
+
+
 async def h_toggle(request):
     STATE["active"] = not STATE.get("active", True)
     _save_state(STATE)
@@ -223,6 +325,7 @@ def build_web_app() -> web.Application:
         web.get("/resolve", h_resolve),
         web.post("/send", h_send),
         web.post("/send_form", h_send_form),
+        web.post("/send_outreach", h_send_outreach),
         web.post("/toggle", h_toggle),
         web.post("/limit", h_limit),
     ])
