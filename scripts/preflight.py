@@ -62,10 +62,9 @@ async def main():
     check(stuck == 0, "no stuck candidates",
           f"{stuck} stuck in CALLING (auto-requeued at 09:00)", soft=True)
 
-    # 4. pause state
-    st = json.load(open("/opt/ai-recruiter/state/ai_recruiter_state.json")) \
-        if os.path.exists("/opt/ai-recruiter/state/ai_recruiter_state.json") else {}
-    check(st.get("calls_paused") is False, "calls NOT paused", "CALLS ARE PAUSED")
+    # 4. pause state — read it exactly the way the services do
+    from src.bot.admin import calls_paused as _paused
+    check(_paused() is False, "calls NOT paused", "CALLS ARE PAUSED")
 
     # 5. userbot reachable
     try:
