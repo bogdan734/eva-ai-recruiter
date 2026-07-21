@@ -52,19 +52,41 @@ async def _cmd_queue(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def _send_daily(app: Application) -> None:
+def _report_recipients() -> list[int]:
+    """Everyone who should get the digest: all admins, not just the report chat."""
+    import os
+
+    ids: list[int] = []
+    for raw in os.getenv("TG_ADMIN_CHAT_IDS", "").split(","):
+        raw = raw.strip()
+        if raw.lstrip("-").isdigit():
+            ids.append(int(raw))
     s = get_settings()
-    if not s.tg_report_chat_id:
-        log.warning("daily.skip", reason="no_chat_id_configured")
+    if s.tg_report_chat_id and int(s.tg_report_chat_id) not in ids:
+        ids.append(int(s.tg_report_chat_id))
+    return ids
+
+
+async def _send_daily(app: Application) -> None:
+    recipients = _report_recipients()
+    if not recipients:
+        log.warning("daily.skip", reason="no_recipients_configured")
         return
     text = await yesterdays_report()
-    await app.bot.send_message(
-        chat_id=s.tg_report_chat_id,
-        text=text,
-        parse_mode=ParseMode.MARKDOWN,
-        disable_web_page_preview=True,
-    )
-    log.info("daily.sent", chat=s.tg_report_chat_id)
+    sent = 0
+    for chat_id in recipients:
+        try:
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+            )
+            sent += 1
+        except Exception as e:
+            # One blocked chat must not stop the digest for everyone else.
+            log.warning("daily.send_failed", chat=chat_id, error=str(e))
+    log.info("daily.sent", recipients=sent, of=len(recipients))
 
 
 def build_app() -> Application:
@@ -86,7 +108,11 @@ async def _run() -> None:
     scheduler = AsyncIOScheduler(timezone=s.app_timezone)
     scheduler.add_job(
         _send_daily,
-        trigger=CronTrigger(hour=s.tg_report_hour, minute=s.tg_report_minute),
+        trigger=CronTrigger(
+            hour=s.tg_report_hour,
+            minute=s.tg_report_minute,
+            timezone=s.app_timezone,  # without this 9:00 means 9:00 UTC
+        ),
         kwargs={"app": app},
         id="daily_report",
         replace_existing=True,
