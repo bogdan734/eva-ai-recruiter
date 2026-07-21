@@ -323,7 +323,10 @@ class CallOrchestrator:
             if summary.qualified:
                 candidate.status = CandidateStatus.MANAGER_REVIEW
                 new_stage = STAGE_MAP.get("manager_review")
-            elif summary.spoke_with_candidate:
+            elif summary.spoke_with_candidate and duration_sec >= 60:
+                # Below a minute nobody has answered the screening questions —
+                # treat it as a dropped call, not a rejection, or we close people
+                # who merely picked up and hung up.
                 # Screening actually happened and the candidate did not fit —
                 # close them out. Re-dialing someone who already answered the
                 # questions annoys people and burns minutes.
@@ -346,7 +349,7 @@ class CallOrchestrator:
             if not candidate.keycrm_lead_id:
                 should_push = (
                     summary.qualified
-                    or summary.spoke_with_candidate  # screened, recruiter should see it
+                    or (summary.spoke_with_candidate and duration_sec >= 60)
                     or candidate.call_attempts >= self._settings.call_max_attempts
                 )
                 if should_push:

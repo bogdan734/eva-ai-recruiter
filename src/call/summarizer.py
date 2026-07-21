@@ -31,9 +31,11 @@ You must return ONLY a tool call to summarize_call with these fields:
   - language: uk | ru | en | mixed
   - qualified: true if candidate meets vacancy requirements AND wants to proceed
   - candidate_age: the age in years the candidate stated during the call, else null
-  - spoke_with_candidate: true ONLY if the candidate actually talked with the agent
-    (answered questions about themselves). False for voicemail, silence, immediate
-    hangup, wrong number or 'cannot hear you' calls.
+  - spoke_with_candidate: true ONLY if the candidate ANSWERED AT LEAST ONE screening
+    question about themselves (experience, city, age, current job or availability).
+    Greeting the agent, confirming their name, or listening to the pitch is NOT enough.
+    False for voicemail, silence, immediate hangup, wrong number, 'cannot hear you',
+    and any call that ended before the candidate said anything about themselves.
   - needs_anketa: true if the agent promised to send an anketa/form link in Telegram
     (candidate was told the form would be sent), or the candidate agreed to fill a form
   - best_callback_time: ISO datetime string if a callback was requested, else null
