@@ -147,6 +147,32 @@ class KeyCRMClient:
     async def move_to_status(self, lead_id: int, status_id: int) -> dict[str, Any]:
         return await self.update_lead(lead_id, {"status_id": status_id})
 
+    async def write_call_results(
+        self,
+        lead_id: int,
+        *,
+        summary: str | None = None,
+        transcript: str | None = None,
+        audio_url: str | None = None,
+        region: str | None = None,
+        match_score: int | None = None,
+    ) -> dict[str, Any]:
+        """Push what Eva learned on the call into the card's AI fields."""
+        custom: list[dict[str, Any]] = []
+        if summary:
+            custom.append({"uuid": FIELD_AI_SUMMARY, "value": summary[:8000]})
+        if transcript:
+            custom.append({"uuid": FIELD_AI_TRANSCRIPT, "value": transcript[:8000]})
+        if audio_url:
+            custom.append({"uuid": FIELD_AI_AUDIO, "value": audio_url})
+        if region:
+            custom.append({"uuid": FIELD_AI_REGION, "value": region[:250]})
+        if match_score is not None:
+            custom.append({"uuid": FIELD_AI_MATCH_SCORE, "value": int(match_score)})
+        if not custom:
+            return {}
+        return await self.update_lead(lead_id, {"custom_fields": custom})
+
     async def append_manager_comment(self, lead_id: int, addition: str) -> dict[str, Any]:
         r = await self._client.get(f"/pipelines/cards/{lead_id}")
         r.raise_for_status()

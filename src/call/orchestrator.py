@@ -360,6 +360,29 @@ class CallOrchestrator:
                             candidate_id=candidate.id,
                         )
 
+            # Put the conversation itself on the card — summary, transcript,
+            # recording — otherwise the recruiter opens a lead with no context.
+            if candidate.keycrm_lead_id:
+                try:
+                    await self._keycrm.write_call_results(
+                        candidate.keycrm_lead_id,
+                        summary=summary.summary,
+                        transcript=transcript,
+                        audio_url=recording_url,
+                        region=candidate.region,
+                        match_score=candidate.match_score,
+                    )
+                    await self._keycrm.append_manager_comment(
+                        candidate.keycrm_lead_id,
+                        f"дзвінок {datetime.utcnow():%d.%m %H:%M} UTC | "
+                        f"{int(duration_sec)}с | {summary.sentiment} | "
+                        f"{'КВАЛІФІКОВАНИЙ' if summary.qualified else 'не кваліфікований'}"
+                        + (f" | вік {summary.candidate_age}" if summary.candidate_age else "")
+                        + f"\n{(summary.summary or '')[:1500]}",
+                    )
+                except Exception as e:
+                    log.warning("orchestrator.keycrm_results_failed", error=str(e))
+
             if candidate.keycrm_lead_id and new_stage is not None:
                 try:
                     await self._keycrm.move_to_status(
