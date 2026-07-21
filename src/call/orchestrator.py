@@ -275,12 +275,13 @@ class CallOrchestrator:
 
         db_call.ended_at = datetime.utcnow()
         db_call.duration_sec = int(duration_sec)
-        db_call.audio_url = recording_url
+        db_call.audio_url = (recording_url or "")[:512] or None
         db_call.transcript = transcript
         db_call.ai_summary = summary.summary
-        db_call.sentiment = summary.sentiment
+        # Clamp to the column widths — a model can return anything.
+        db_call.sentiment = (summary.sentiment or "")[:16] or None
         db_call.objections = summary.objections
-        db_call.language_used = summary.language
+        db_call.language_used = (summary.language or "")[:8] or None
         db_call.tokens_input += summary.tokens_in
         db_call.tokens_output += summary.tokens_out
         # Age gate: the voice model may misjudge the window, so enforce it here —
