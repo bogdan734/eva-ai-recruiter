@@ -23,6 +23,7 @@ log = logging.getLogger("recruiter.scheduler")
 # One slot works the queue in batches; pause lets placed calls finish first.
 SLOT_BATCH_PAUSE_SEC = 120
 SLOT_MAX_BATCHES = 40  # safety cap (~120 candidates per slot)
+CALLING_WINDOW_END_HOUR = 20  # never start a new batch at or after 20:00 local
 
 
 async def run_slot() -> None:
@@ -69,6 +70,9 @@ async def run_slot() -> None:
         if calls_paused():
             log.info("scheduler.paused_mid_session — stopping after batch %d", batches)
             break
+        if _past_calling_window():
+            log.info("scheduler.window_closed — stopping after batch %d", batches)
+            break
         await asyncio.sleep(SLOT_BATCH_PAUSE_SEC)
 
     if total == 0:
@@ -77,6 +81,15 @@ async def run_slot() -> None:
         log.info("scheduler.slot_done batches=%d dialed=%d", batches, total)
 
 
+
+
+def _past_calling_window() -> bool:
+    """True once we are outside the hours it is acceptable to call people."""
+    from zoneinfo import ZoneInfo
+
+    s = get_settings()
+    now = datetime.now(ZoneInfo(s.app_timezone))
+    return now.hour >= CALLING_WINDOW_END_HOUR
 
 async def _requeue_stuck_calls(max_age_min: int = 15) -> None:
     """Return candidates stranded in CALLING back to the queue.

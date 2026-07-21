@@ -25,6 +25,12 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:8000:8000"
+    environment:
+      # Same shared state file as bot/scheduler, otherwise the API would read a
+      # stale copy in /tmp and miss the pause flag.
+      - STATE_PATH=/state/ai_recruiter_state.json
+    volumes:
+      - ../state:/state
 
   scheduler:
     build:
