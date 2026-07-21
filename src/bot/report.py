@@ -54,7 +54,7 @@ async def collect_for(target: date) -> DayReport:
         # Calls aggregation
         rows = await session.execute(
             select(Call.status, func.count(Call.id), func.coalesce(func.sum(Call.duration_sec), 0)).where(
-                func.date(Call.started_at) == iso
+                func.date(Call.started_at) == target
             ).group_by(Call.status)
         )
         success_durations: list[int] = []
@@ -78,7 +78,7 @@ async def collect_for(target: date) -> DayReport:
         qualified_q = await session.execute(
             select(func.count(Candidate.id)).where(
                 Candidate.status == CandidateStatus.MANAGER_REVIEW,
-                func.date(Candidate.updated_at) == iso,
+                func.date(Candidate.updated_at) == target,
             )
         )
         rep.qualified = int(qualified_q.scalar() or 0)

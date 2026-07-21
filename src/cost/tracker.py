@@ -5,7 +5,7 @@ from datetime import date
 from typing import Any
 
 from sqlalchemy import func, select
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.common.db import session_scope
 from src.common.models import Call, DailyCost
@@ -22,7 +22,7 @@ async def rollup_for_date(target: date) -> dict[str, Any]:
             func.sum(Call.tokens_output),
             func.sum(Call.cost_usd),
             func.count(Call.id),
-        ).where(func.date(Call.started_at) == iso)
+        ).where(func.date(Call.started_at) == target)
         row = (await session.execute(q)).one()
         duration_sec, tok_in, tok_out, total_usd, count = row
         duration_min = (duration_sec or 0) / 60.0
@@ -43,7 +43,7 @@ async def rollup_for_date(target: date) -> dict[str, Any]:
             "vapi_usd": round(duration_min * PRICING.vapi_per_min, 4),
             "telephony_usd": round(duration_min * PRICING.twilio_per_min, 4),
         }
-        stmt = sqlite_insert(DailyCost).values(
+        stmt = pg_insert(DailyCost).values(
             date=iso,
             claude_tokens_in=agg["tokens_in"],
             claude_tokens_out=agg["tokens_out"],
