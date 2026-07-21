@@ -31,6 +31,9 @@ You must return ONLY a tool call to summarize_call with these fields:
   - language: uk | ru | en | mixed
   - qualified: true if candidate meets vacancy requirements AND wants to proceed
   - candidate_age: the age in years the candidate stated during the call, else null
+  - spoke_with_candidate: true ONLY if the candidate actually talked with the agent
+    (answered questions about themselves). False for voicemail, silence, immediate
+    hangup, wrong number or 'cannot hear you' calls.
   - needs_anketa: true if the agent promised to send an anketa/form link in Telegram
     (candidate was told the form would be sent), or the candidate agreed to fill a form
   - best_callback_time: ISO datetime string if a callback was requested, else null
@@ -62,6 +65,7 @@ _TOOL = {
             "language": {"type": "string", "enum": ["uk", "ru", "en", "mixed"]},
             "qualified": {"type": "boolean"},
             "candidate_age": {"type": ["integer", "null"]},
+            "spoke_with_candidate": {"type": "boolean"},
             "needs_anketa": {"type": "boolean"},
             "best_callback_time": {"type": ["string", "null"]},
         },
@@ -79,6 +83,7 @@ class CallSummary:
     qualified: bool
     needs_anketa: bool = False
     candidate_age: int | None = None
+    spoke_with_candidate: bool = False
     best_callback_time: str | None = None
     tokens_in: int = 0
     tokens_out: int = 0
@@ -125,6 +130,7 @@ class Summarizer:
                     qualified=bool(d["qualified"]),
                     needs_anketa=bool(d.get("needs_anketa", False)),
                     candidate_age=d.get("candidate_age"),
+                    spoke_with_candidate=bool(d.get("spoke_with_candidate", False)),
                     best_callback_time=d.get("best_callback_time"),
                     tokens_in=resp.usage.input_tokens,
                     tokens_out=resp.usage.output_tokens,

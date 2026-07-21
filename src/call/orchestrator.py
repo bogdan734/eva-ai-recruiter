@@ -323,6 +323,12 @@ class CallOrchestrator:
             if summary.qualified:
                 candidate.status = CandidateStatus.MANAGER_REVIEW
                 new_stage = STAGE_MAP.get("manager_review")
+            elif summary.spoke_with_candidate:
+                # Screening actually happened and the candidate did not fit —
+                # close them out. Re-dialing someone who already answered the
+                # questions annoys people and burns minutes.
+                candidate.status = CandidateStatus.CLOSED
+                new_stage = STAGE_MAP.get("closed")
             elif candidate.call_attempts >= self._settings.call_max_attempts:
                 candidate.status = CandidateStatus.UNREACHABLE
                 new_stage = STAGE_MAP.get("unreachable")
@@ -334,8 +340,10 @@ class CallOrchestrator:
             # verdict, then set the stage to match. Skip creation on clear
             # non-signals (no answer + retry left) — that just retries later.
             if not candidate.keycrm_lead_id:
-                should_push = summary.qualified or (
-                    candidate.call_attempts >= self._settings.call_max_attempts
+                should_push = (
+                    summary.qualified
+                    or summary.spoke_with_candidate  # screened, recruiter should see it
+                    or candidate.call_attempts >= self._settings.call_max_attempts
                 )
                 if should_push:
                     try:
