@@ -2,12 +2,27 @@
     email admin@kozyrtrans-ai.com
 }
 
-api.kozyrtrans-ai.com {
-    reverse_proxy api:8000
+(api_upstream) {
+    # Re-resolve the container address instead of caching it forever: every
+    # rebuild of the api service gives it a new IP, and a cached one silently
+    # black-holes Vapi webhooks (21 lost deliveries before this was noticed).
+    reverse_proxy {
+        dynamic a {
+            name api
+            port 8000
+            refresh 10s
+        }
+        health_uri /health
+        health_interval 15s
+        health_timeout 5s
+    }
     encode gzip
 }
 
+api.kozyrtrans-ai.com {
+    import api_upstream
+}
+
 webhooks.kozyrtrans-ai.com {
-    reverse_proxy api:8000
-    encode gzip
+    import api_upstream
 }

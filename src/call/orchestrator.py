@@ -300,28 +300,6 @@ class CallOrchestrator:
 
         db_call.status = CallStatus.SUCCESS if summary.qualified else CallStatus.HANGUP
 
-        # Unreachable by phone -> reach out in Telegram instead.
-        if needs_tg_outreach and candidate and candidate.phone_e164:
-            try:
-                async with httpx.AsyncClient(timeout=20) as tg:
-                    r = await tg.post(
-                        f"{self._settings.tguserbot_url}/send_outreach",
-                        json={
-                            "phone": candidate.phone_e164,
-                            "name": candidate.full_name or "",
-                            "kind": needs_tg_outreach,
-                        },
-                    )
-                    log.info(
-                        "orchestrator.tg_outreach",
-                        kind=needs_tg_outreach,
-                        status=r.status_code,
-                        resp=r.text[:200],
-                        candidate_id=candidate.id,
-                    )
-            except Exception as e:
-                log.warning("orchestrator.tg_outreach_failed", error=str(e))
-
         # Cold-base promise fulfilment: Єва pledged to send the anketa in Telegram.
         if summary.needs_anketa and candidate and candidate.phone_e164:
             try:
@@ -373,6 +351,29 @@ class CallOrchestrator:
                 # them makes 3-week-old applications look brand new. The calling
                 # queue lives in our DB, not in the CRM stage.
                 new_stage = STAGE_MAP.get("in_call_queue") if summary.spoke_with_candidate else None
+
+        # Unreachable by phone -> reach out in Telegram instead.
+        if needs_tg_outreach and candidate and candidate.phone_e164:
+            try:
+                async with httpx.AsyncClient(timeout=20) as tg:
+                    r = await tg.post(
+                        f"{self._settings.tguserbot_url}/send_outreach",
+                        json={
+                            "phone": candidate.phone_e164,
+                            "name": candidate.full_name or "",
+                            "kind": needs_tg_outreach,
+                        },
+                    )
+                    log.info(
+                        "orchestrator.tg_outreach",
+                        kind=needs_tg_outreach,
+                        status=r.status_code,
+                        resp=r.text[:200],
+                        candidate_id=candidate.id,
+                    )
+            except Exception as e:
+                log.warning("orchestrator.tg_outreach_failed", error=str(e))
+
 
             # Deferred-KeyCRM mode: create the lead now that we have a
             # verdict, then set the stage to match. Skip creation on clear
