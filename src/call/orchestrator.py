@@ -276,6 +276,21 @@ class CallOrchestrator:
         db_call.language_used = summary.language
         db_call.tokens_input += summary.tokens_in
         db_call.tokens_output += summary.tokens_out
+        # Age gate: the voice model may misjudge the window, so enforce it here —
+        # otherwise an out-of-window candidate reaches KeyCRM as qualified.
+        if summary.qualified and summary.candidate_age:
+            s_cfg = self._settings
+            age_lo = min(s_cfg.profile_age_min_f, s_cfg.profile_age_min_m)
+            age_hi = max(s_cfg.profile_age_max_f, s_cfg.profile_age_max_m)
+            if not (age_lo <= summary.candidate_age <= age_hi):
+                log.info(
+                    "orchestrator.age_gate_reject",
+                    age=summary.candidate_age,
+                    window=f"{age_lo}-{age_hi}",
+                    call_id=db_call.id,
+                )
+                summary.qualified = False
+
         db_call.status = CallStatus.SUCCESS if summary.qualified else CallStatus.HANGUP
 
         # Cold-base promise fulfilment: Єва pledged to send the anketa in Telegram.
