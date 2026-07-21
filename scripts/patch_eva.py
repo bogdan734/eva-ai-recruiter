@@ -82,8 +82,8 @@ async def main() -> None:
         "startSpeakingPlan": {
             "waitSeconds": 0.2,
             "transcriptionEndpointingPlan": {
-                "onPunctuationSeconds": 0.35,
-                "onNoPunctuationSeconds": 1.1,
+                "onPunctuationSeconds": 0.25,
+                "onNoPunctuationSeconds": 0.8,
                 "onNumberSeconds": 0.5,
             },
         },
