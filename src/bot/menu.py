@@ -42,8 +42,8 @@ _CRIT_ENV = {
 
 # Available outbound trunks (both carry the same verified UA CLI +380673350196)
 _TRUNKS = {
-    "streamtele": ("907627dc-60fd-43a9-a180-1f5386ceae07", "StreamTelecom"),
-    "ringostat": ("d4c72be0-8db7-41f3-8586-acf28a5afb4e", "Ringostat"),
+    "streamtele": ("5284b036-c03c-4455-a53a-57819d0c3c3b", "StreamTelecom 093 (бойовий)"),
+    "ringostat": ("d4c72be0-8db7-41f3-8586-acf28a5afb4e", "Ringostat (резерв)"),
 }
 
 
@@ -52,7 +52,7 @@ def _current_trunk_key() -> str:
     for k, (tid, _name) in _TRUNKS.items():
         if tid == pid:
             return k
-    return _state.get("trunk", "ringostat")
+    return _state.get("trunk", "streamtele")
 
 
 def _set_trunk(key: str) -> None:
