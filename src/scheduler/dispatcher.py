@@ -125,14 +125,14 @@ def build_scheduler() -> AsyncIOScheduler:
         hour, minute = slot.split(":")
         scheduler.add_job(
             run_slot,
-            trigger=CronTrigger(hour=int(hour), minute=int(minute)),
+            trigger=CronTrigger(hour=int(hour), minute=int(minute), timezone=s.app_timezone),
             id=f"call_slot_{hour}_{minute}",
             replace_existing=True,
         )
     # Poll work.ua every 5 min
     scheduler.add_job(
         poll_workua_responses,
-        trigger=CronTrigger(minute="*/5"),
+        trigger=CronTrigger(minute="*/5", timezone=s.app_timezone),
         id="workua_poll",
         replace_existing=True,
     )
