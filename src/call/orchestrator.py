@@ -25,6 +25,7 @@ from src.common.keycrm import KeyCRMClient
 from src.common.keycrm_fields import STAGE_MAP
 from src.common.models import Call, CallStatus, Candidate, CandidateStatus, Vacancy
 from src.common.phone import normalize_phone
+from src.common import sources as _sources
 from src.common.settings import get_settings
 
 log = structlog.get_logger()
@@ -330,6 +331,7 @@ class CallOrchestrator:
                         json={
                             "phone": candidate.phone_e164,
                             "name": candidate.full_name or "",
+                            "source": _sources.written(candidate.source),
                         },
                     )
                     log.info(
@@ -434,6 +436,7 @@ class CallOrchestrator:
                     )
                     await self._keycrm.append_manager_comment(
                         candidate.keycrm_lead_id,
+                        f"джерело: {_sources.label(candidate.source)} | "
                         f"дзвінок {datetime.utcnow():%d.%m %H:%M} UTC | "
                         f"{int(duration_sec)}с | {summary.sentiment} | "
                         f"{'КВАЛІФІКОВАНИЙ' if summary.qualified else 'не кваліфікований'}"

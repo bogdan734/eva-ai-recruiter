@@ -286,13 +286,29 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         _set_trunk(nxt)
         return await edit(_main_text(), _main_kb())
     if data == "act:status":
-        from src.bot.admin import cmd_status  # reuse
+        from sqlalchemy import func, select
+
+        from src.common import sources as _src
+        from src.common.db import session_scope
+        from src.common.models import Candidate
+
         s = get_settings()
+        async with session_scope() as sess:
+            rows = (await sess.execute(
+                select(Candidate.source, func.count(Candidate.id))
+                .group_by(Candidate.source)
+            )).all()
+        by_source: dict[str, int] = {}
+        for raw, n in rows:
+            lbl = _src.label(raw)
+            by_source[lbl] = by_source.get(lbl, 0) + n
+        src_txt = "\n".join(f"  • {k}: {v}" for k, v in sorted(by_source.items())) or "  —"
         txt = (
             "📊 <b>Статус</b>\n"
             f"Дзвінки: {'⏸ ПАУЗА' if calls_paused() else '🟢 активні'}\n"
             f"Поріг відбору: {s.match_score_threshold}\n"
-            f"Агент: {s.agent_name} / {s.company_name}"
+            f"Агент: {s.agent_name} / {s.company_name}\n"
+            f"\n<b>Кандидати за джерелом:</b>\n{src_txt}"
         )
         return await edit(txt, InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="nav:main")]]))
     if data == "act:report":

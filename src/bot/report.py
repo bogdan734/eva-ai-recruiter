@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 
 from src.common.db import session_scope
 from src.common.models import Call, CallStatus, Candidate, CandidateStatus
+from src.common import sources as _sources
 from src.cost.pricing import PRICING
 
 # how a raw source string maps onto something a human wants to read
@@ -31,15 +32,7 @@ SOURCE_LABELS: dict[str, str] = {
 
 
 def source_label(raw: str | None) -> str:
-    if not raw:
-        return "невідомо"
-    key = raw.strip().lower()
-    if key in SOURCE_LABELS:
-        return SOURCE_LABELS[key]
-    for prefix, label in (("workua", "work.ua"), ("robota", "robota.ua")):
-        if key.startswith(prefix):
-            return label
-    return raw
+    return _sources.label(raw)
 
 
 @dataclass

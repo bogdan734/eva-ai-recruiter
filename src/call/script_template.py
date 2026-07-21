@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from string import Template
 
+from src.common import sources as _sources
 from src.common.settings import get_settings
 
 _TPL = Template(
@@ -39,7 +40,7 @@ CANDIDATE
 - Phone: ${candidate_phone}
 - Desired position (from resume): ${candidate_position}
 - Region (from resume): ${candidate_region}
-- Source: ${source}
+- Source: ${source} (вимовляти як: ${source_spoken})
 
 VACANCY (${vacancy_title})
 - Company does: ${company_pitch}
@@ -290,7 +291,8 @@ OBJECTION BANK (short, then steer to interview)
 - "Чи можна в офіс/гібрид?" → "Формат обговорюється на співбесіді." (do not over-explain)
 - "Хто буде керівник?" → "Деталі — на співбесіді з рекрутером. Вона все розповість."
 - "Коли можу почати?" → "Обговоримо на співбесіді."
-- "Звідки мій номер?" → "Ви залишали резюме на work.ua — звідти ваш контакт."
+- "Звідки мій номер?" → "${source_origin}"
+  (NEVER name a different job board than the one above — the candidate will notice.)
 - "Видаліть мої дані" → "Прийнято. Передам у відділ — видалимо протягом 30 днів."
 
 After EVERY step, call update_call_state(step=N, ...) to record progress.
@@ -308,6 +310,8 @@ def render_system_prompt(
     candidate_position: str = "{CANDIDATE_POSITION}",
     candidate_region: str = "{CANDIDATE_REGION}",
     source: str = "{SOURCE}",
+    source_spoken: str | None = None,
+    source_origin: str | None = None,
     vacancy_title: str | None = None,
     vacancy_salary: str | None = None,
     vacancy_schedule: str | None = None,
@@ -333,6 +337,8 @@ def render_system_prompt(
         candidate_position=candidate_position,
         candidate_region=candidate_region,
         source=source,
+        source_spoken=source_spoken or _sources.spoken(source),
+        source_origin=source_origin or _sources.origin(source),
         vacancy_title=vacancy_title or s.default_vacancy_title,
         vacancy_salary=vacancy_salary or s.default_vacancy_salary,
         vacancy_schedule=vacancy_schedule or s.default_vacancy_schedule,

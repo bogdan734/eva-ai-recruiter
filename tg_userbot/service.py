@@ -213,7 +213,7 @@ async def do_send_outreach(phone: str, name: str, kind: str) -> dict:
     return {"ok": True, "kind": kind, "sent_to": phone, "sent_today": store.sent_today()}
 
 
-async def do_send(target: str, name: str) -> dict:
+async def do_send(target: str, name: str, source: str = "") -> dict:
     if not STATE.get("active", True):
         return {"ok": False, "error": "Розсилку поставлено на паузу"}
     limit = int(STATE.get("limit", 15))
@@ -226,7 +226,10 @@ async def do_send(target: str, name: str) -> dict:
     peer = str(entity.id)
     if store.already_contacted(peer):
         return {"ok": False, "error": "Вже писали цьому кандидату (анти-спам)"}
-    text = INTRO_TEMPLATE.format(name=name or "вітаю")
+    text = INTRO_TEMPLATE.format(
+        name=name or "вітаю",
+        source=source or "сайті пошуку роботи",
+    )
     try:
         await human_typing(entity, text)
         await client.send_message(entity, text)
@@ -265,7 +268,11 @@ async def h_stats(request):
 
 async def h_send(request):
     body = await request.json()
-    res = await do_send(str(body.get("target", "")).strip(), str(body.get("name", "")).strip())
+    res = await do_send(
+        str(body.get("target", "")).strip(),
+        str(body.get("name", "")).strip(),
+        str(body.get("source", "")).strip(),
+    )
     return web.json_response(res)
 
 
