@@ -91,3 +91,29 @@ async def workua_manual(payload: WorkUaInboundPayload) -> dict[str, Any]:
     log.info("workua.manual_inbound", phone=payload.phone)
     await handle_workua_inbound(payload)
     return {"ok": True}
+
+
+@app.get("/recordings/{vapi_call_id}")
+async def get_recording(vapi_call_id: str):
+    """Redirect to a freshly signed recording URL.
+
+    Vapi's stored recordingUrl is not publicly fetchable and its presigned URLs
+    expire within the hour, so the CRM card links here instead.
+    """
+    import httpx
+    from fastapi.responses import RedirectResponse
+
+    s = get_settings()
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.get(
+            f"https://api.vapi.ai/call/{vapi_call_id}",
+            headers={"Authorization": f"Bearer {s.vapi_api_key}"},
+        )
+        if r.status_code != 200:
+            raise HTTPException(status_code=404, detail="call not found")
+        art = (r.json() or {}).get("artifact") or {}
+
+    url = art.get("presignedMonoUrl") or art.get("presignedStereoUrl")
+    if not url:
+        raise HTTPException(status_code=404, detail="recording not available")
+    return RedirectResponse(url)

@@ -373,11 +373,18 @@ class CallOrchestrator:
             # recording — otherwise the recruiter opens a lead with no context.
             if candidate.keycrm_lead_id:
                 try:
+                    # Vapi's recordingUrl needs S3 auth and its presigned links
+                    # expire within the hour — link to our own redirect instead.
+                    playable = (
+                        f"{self._settings.app_base_url.rstrip('/')}/recordings/{db_call.vapi_call_id}"
+                        if db_call.vapi_call_id
+                        else recording_url
+                    )
                     await self._keycrm.write_call_results(
                         candidate.keycrm_lead_id,
                         summary=summary.summary,
                         transcript=transcript,
-                        audio_url=recording_url,
+                        audio_url=playable,
                         region=candidate.region,
                         match_score=candidate.match_score,
                     )
