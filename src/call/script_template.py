@@ -297,6 +297,13 @@ def render_system_prompt(
     vacancy_salary: str | None = None,
     vacancy_schedule: str | None = None,
     vacancy_benefits: str | None = None,
+    # Legacy kwargs still passed by the orchestrator. Accepted so scheduled calls
+    # do not blow up; the prompt carries its own pitch/requirements text.
+    # NOTE: vacancy_location is intentionally ignored — it arrives as "Україна"
+    # and must never overwrite allowed_regions, or the geo screen stops working.
+    vacancy_pitch: str | None = None,
+    vacancy_requirements: str | None = None,
+    vacancy_location: str | None = None,
     allowed_regions: str = (
         "правобережна Україна (без м. Київ, Сум, Запоріжжя, Херсона, Донецької обл.)"
     ),

@@ -35,7 +35,7 @@ class VapiWebhookPayload(BaseModel):
     transcript: str | None = None
     recording_url: str | None = None
     duration_sec: float | None = None
-    cost: dict[str, Any] | None = None
+    cost: Any = None  # Vapi sends a float here, older docs said object
     analysis: dict[str, Any] | None = None
     raw: dict[str, Any] | None = None
 

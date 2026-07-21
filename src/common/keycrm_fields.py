@@ -37,16 +37,18 @@ FIELD_MAP: dict[str, int] = {
 }
 
 # Stage tech_key -> KeyCRM stage id
+# Real status ids of KeyCRM pipeline 1 ("1 Етап Менеджер з продажу").
+# Previously all zeros — the API fill never ran, so no lead ever changed stage.
 STAGE_MAP: dict[str, int] = {
-    "new_resume": 0,
-    "filtered": 0,
-    "in_call_queue": 0,
-    "calling": 0,
-    "unreachable": 0,
-    "call_done": 0,
-    "manager_review": 0,
-    "interview_scheduled": 0,
-    "closed": 0,
+    "new_resume": 1,          # Новий
+    "filtered": 2,            # Відібрано
+    "in_call_queue": 3,       # В роботі
+    "calling": 3,             # В роботі
+    "unreachable": 31,        # Недозвін
+    "call_done": 3,           # В роботі
+    "manager_review": 2,      # Відібрано — Єва передала рекрутеру на розгляд
+    "interview_scheduled": 10,  # Запросили на 1 тур
+    "closed": 33,             # Не підходить нам
 }
 
 

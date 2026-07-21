@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -19,6 +20,10 @@ from src.common.settings import get_settings
 
 log = logging.getLogger("recruiter.scheduler")
 
+# One slot works the queue in batches; pause lets placed calls finish first.
+SLOT_BATCH_PAUSE_SEC = 120
+SLOT_MAX_BATCHES = 40  # safety cap (~120 candidates per slot)
+
 
 async def run_slot() -> None:
     from src.bot.admin import calls_paused
@@ -26,30 +31,73 @@ async def run_slot() -> None:
         log.info("scheduler.paused — skipping slot")
         return
     s = get_settings()
+    await _requeue_stuck_calls()
     orchestrator = CallOrchestrator()
-    async with session_scope() as session:
-        q = await session.execute(
-            select(Candidate)
-            .where(
-                Candidate.status.in_(
-                    (
-                        CandidateStatus.NEW_RESUME,
-                        CandidateStatus.IN_CALL_QUEUE,
-                    )
-                ),
-                Candidate.call_attempts < s.call_max_attempts,
-            )
-            .order_by(Candidate.match_score.desc().nulls_last(), Candidate.created_at)
-            .limit(s.call_max_concurrent)
-        )
-        batch = q.scalars().all()
-        if not batch:
-            log.info("scheduler.empty_slot")
-            return
-        log.info("scheduler.slot_start", extra={"batch_size": len(batch)})
-        ids = [c.id for c in batch]
 
-    await asyncio.gather(*(orchestrator.dispatch_for_candidate(cid) for cid in ids))
+    # A slot is a calling SESSION: keep pulling batches until the queue is empty.
+    # Without this a slot dialed only MAX_CONCURRENT people and a large queue
+    # would take days to work through.
+    total, batches = 0, 0
+    while batches < SLOT_MAX_BATCHES:
+        async with session_scope() as session:
+            q = await session.execute(
+                select(Candidate)
+                .where(
+                    Candidate.status.in_(
+                        (
+                            CandidateStatus.NEW_RESUME,
+                            CandidateStatus.IN_CALL_QUEUE,
+                        )
+                    ),
+                    Candidate.call_attempts < s.call_max_attempts,
+                )
+                .order_by(Candidate.match_score.desc().nulls_last(), Candidate.created_at)
+                .limit(s.call_max_concurrent)
+            )
+            batch = q.scalars().all()
+            if not batch:
+                break
+            ids = [c.id for c in batch]
+
+        batches += 1
+        total += len(ids)
+        log.info("scheduler.batch start=%d size=%d total=%d", batches, len(ids), total)
+        await asyncio.gather(*(orchestrator.dispatch_for_candidate(cid) for cid in ids))
+
+        # Let the placed calls run before dialing the next batch, otherwise
+        # concurrency grows unbounded across the session.
+        if calls_paused():
+            log.info("scheduler.paused_mid_session — stopping after batch %d", batches)
+            break
+        await asyncio.sleep(SLOT_BATCH_PAUSE_SEC)
+
+    if total == 0:
+        log.info("scheduler.empty_slot")
+    else:
+        log.info("scheduler.slot_done batches=%d dialed=%d", batches, total)
+
+
+
+async def _requeue_stuck_calls(max_age_min: int = 15) -> None:
+    """Return candidates stranded in CALLING back to the queue.
+
+    A crash between "status = CALLING" and the Vapi request leaves them stuck
+    forever, so they silently drop out of the campaign.
+    """
+    from datetime import timedelta
+    cutoff = datetime.utcnow() - timedelta(minutes=max_age_min)
+    async with session_scope() as session:
+        rows = (await session.execute(
+            select(Candidate).where(
+                Candidate.status == CandidateStatus.CALLING,
+                Candidate.updated_at < cutoff,
+            )
+        )).scalars().all()
+        for cand in rows:
+            cand.status = CandidateStatus.IN_CALL_QUEUE
+            cand.call_attempts = max(0, cand.call_attempts - 1)
+        if rows:
+            log.info("scheduler.requeued_stuck count=%d", len(rows))
 
 
 async def poll_workua_responses() -> None:

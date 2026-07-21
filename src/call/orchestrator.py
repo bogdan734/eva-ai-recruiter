@@ -75,7 +75,13 @@ class CallOrchestrator:
         )
 
         overrides: dict[str, Any] = {
-            "model": {"messages": [{"role": "system", "content": prompt}]},
+            # provider+model are REQUIRED by Vapi whenever model is overridden;
+            # sending messages alone returns HTTP 400 and the call never happens.
+            "model": {
+                "provider": "anthropic",
+                "model": "claude-haiku-4-5-20251001",
+                "messages": [{"role": "system", "content": prompt}],
+            },
             "metadata": {
                 "candidate_id": candidate.id,
                 "vacancy_id": candidate.vacancy_id,
@@ -91,7 +97,7 @@ class CallOrchestrator:
                 assistant_overrides=overrides,
                 metadata={"candidate_id": candidate.id},
             )
-        except Exception as e:
+        except Exception as e:  # prompt render or dispatch failed
             log.error("orchestrator.dispatch_failed", error=str(e), id=candidate.id)
             # failed to place the call -> put candidate back in the queue instead
             # of leaving it stuck in CALLING forever
@@ -354,10 +360,36 @@ class CallOrchestrator:
                             candidate_id=candidate.id,
                         )
 
-            if candidate.keycrm_lead_id and new_stage:
+            if candidate.keycrm_lead_id and new_stage is not None:
                 try:
                     await self._keycrm.move_to_status(
                         candidate.keycrm_lead_id, new_stage
                     )
                 except Exception as e:
+                    # The card may have been deleted in KeyCRM while we still hold
+                    # its id — recreate it, otherwise the candidate is invisible
+                    # to the recruiter forever.
                     log.warning("orchestrator.keycrm_move_failed", error=str(e))
+                    try:
+                        recreated = await self._keycrm.create_lead(
+                            title=candidate.full_name,
+                            full_name=candidate.full_name,
+                            phone=candidate.phone_e164,
+                            email=candidate.email,
+                            vacancy_name=(vacancy.title if vacancy else "Менеджер з продажу"),
+                            manager_comment=(
+                                f"Відновлено ботом (картка {candidate.keycrm_lead_id} "
+                                f"відсутня в CRM) | {(summary.summary or '')[:300]}"
+                            ),
+                        )
+                        new_id = int(recreated.get("id") or 0)
+                        if new_id:
+                            candidate.keycrm_lead_id = new_id
+                            await self._keycrm.move_to_status(new_id, new_stage)
+                            log.info(
+                                "orchestrator.keycrm_lead_recreated",
+                                candidate_id=candidate.id,
+                                lead_id=new_id,
+                            )
+                    except Exception as e2:
+                        log.error("orchestrator.keycrm_recreate_failed", error=str(e2))
