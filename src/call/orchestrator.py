@@ -417,36 +417,13 @@ class CallOrchestrator:
                         candidate.keycrm_lead_id, new_stage
                     )
                 except Exception as e:
-                    # The card may have been deleted in KeyCRM while we still hold
-                    # its id — recreate it, otherwise the candidate is invisible
-                    # to the recruiter forever.
-                    log.warning("orchestrator.keycrm_move_failed", error=str(e))
-                    try:
-                        recreated = await self._keycrm.create_lead(
-                            title=candidate.full_name,
-                            full_name=candidate.full_name,
-                            phone=candidate.phone_e164,
-                            email=candidate.email,
-                            vacancy_name=(vacancy.title if vacancy else "Менеджер з продажу"),
-                            manager_comment=(
-                                f"Відновлено ботом (картка {candidate.keycrm_lead_id} "
-                                f"відсутня в CRM) | {(summary.summary or '')[:300]}"
-                            ),
-                        )
-                        new_id = int(recreated.get("id") or 0)
-                        if new_id:
-                            candidate.keycrm_lead_id = new_id
-                            await self._keycrm.move_to_status(new_id, new_stage)
-                            # KeyCRM stamps its own default manager on creation —
-                            # re-assign so the lead still reads as AI-handled.
-                            if self._settings.keycrm_ai_manager_id:
-                                await self._keycrm.assign_manager(
-                                    new_id, self._settings.keycrm_ai_manager_id
-                                )
-                            log.info(
-                                "orchestrator.keycrm_lead_recreated",
-                                candidate_id=candidate.id,
-                                lead_id=new_id,
-                            )
-                    except Exception as e2:
-                        log.error("orchestrator.keycrm_recreate_failed", error=str(e2))
+                    # A missing card almost always means a recruiter deleted it on
+                    # purpose. Do NOT recreate it — that would drag rejected people
+                    # back into the pipeline. Close the candidate instead.
+                    log.warning(
+                        "orchestrator.keycrm_card_missing",
+                        error=str(e),
+                        candidate_id=candidate.id,
+                        lead_id=candidate.keycrm_lead_id,
+                    )
+                    candidate.status = CandidateStatus.CLOSED
