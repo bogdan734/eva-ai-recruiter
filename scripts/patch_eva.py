@@ -46,11 +46,11 @@ async def main() -> None:
         "model": {
             "provider": "anthropic",
             "model": "claude-haiku-4-5-20251001",
-            "maxTokens": 200,
+            "maxTokens": 500,
             "temperature": 0.4,
             "messages": [{"role": "system", "content": inbound_prompt}],
         },
-        "firstMessage": "… Алло! Доброго дня!",
+        "firstMessage": "… Алло! Добрий день!",
         "firstMessageMode": "assistant-speaks-first",
         # 120s + idle re-prompts: mitigation for Telnyx WS media-fork bug
         # (inbound track replaced by TTS echo, outbound delayed ~11s) —
