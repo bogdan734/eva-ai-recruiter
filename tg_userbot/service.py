@@ -15,6 +15,7 @@ import json
 import os
 import random
 
+import aiohttp
 from aiohttp import web
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
@@ -37,7 +38,10 @@ STATE_PATH = os.environ.get("TG_STATE_PATH", "eva_state.json")
 client = TelegramClient(os.environ.get("TG_SESSION", "eva_session"), API_ID, API_HASH)
 claude = Anthropic()
 
-SYSTEM_PROMPT = _BASE_PROMPT
+VACANCY_URL = os.environ.get("VACANCY_URL", "https://www.work.ua/jobs/8249916/")
+API_URL = os.environ.get("API_URL", "http://api:8000")
+INTERNAL_API_TOKEN = os.environ.get("INTERNAL_API_TOKEN", "change-me-internal")
+SYSTEM_PROMPT = _BASE_PROMPT.replace("{VACANCY_URL}", VACANCY_URL)
 
 
 # ------------------------------ runtime state ------------------------------
@@ -227,6 +231,7 @@ async def do_send(target: str, name: str, source: str = "") -> dict:
     if store.already_contacted(peer):
         return {"ok": False, "error": "Вже писали цьому кандидату (анти-спам)"}
     text = INTRO_TEMPLATE.format(
+        vacancy_url=VACANCY_URL,
         name=name or "вітаю",
         source=source or "сайті пошуку роботи",
     )
@@ -339,6 +344,103 @@ def build_web_app() -> web.Application:
     return app
 
 
+
+# ------------------------------ chat -> CRM ------------------------------
+_CLASSIFY_SYSTEM = """You read a recruiting chat between Eva (assistant) and a
+candidate for a B2B logistics-sales manager role at Kozyr Trans. Decide the
+outcome so far. Portrait: at least ~1 year real work experience in sales /
+logistics / client work (courses or studying do NOT count); lives in
+right-bank Ukraine (not Kyiv, Sumy, Zaporizhzhia, Kherson, Donetsk obl.);
+age roughly 23-42; ready for full-time with NO side job.
+
+Return ONLY a JSON object:
+{"verdict": "qualified" | "not_fit" | "in_progress",
+ "region": string|null, "age": integer|null,
+ "summary": "1-2 short Ukrainian bullet points of what was learned"}
+
+- "qualified": the candidate clearly fits the portrait AND agreed to be passed to
+  a recruiter / to an interview.
+- "not_fit": a real answer shows they do NOT fit (no relevant experience, wrong
+  region, side job they will not drop, age outside window).
+- "in_progress": not enough answered yet, or still just greetings/questions.
+Be conservative: only "qualified"/"not_fit" when the chat truly reached it."""
+
+
+def _history_to_text(msgs: list[dict]) -> str:
+    lines = []
+    for m in msgs:
+        who = "Кандидат" if m.get("role") == "user" else "Єва"
+        lines.append(f"{who}: {m.get('content','')}")
+    return "\n".join(lines)
+
+
+async def classify_dialog(msgs: list[dict]) -> dict | None:
+    """Ask Claude for the current outcome of the chat. Returns dict or None."""
+    try:
+        resp = claude.messages.create(
+            model=MODEL, max_tokens=250, system=_CLASSIFY_SYSTEM,
+            messages=[{"role": "user", "content": _history_to_text(msgs)}],
+        )
+        raw = resp.content[0].text.strip()
+        start, end = raw.find("{"), raw.rfind("}")
+        if start == -1 or end == -1:
+            return None
+        return json.loads(raw[start:end + 1])
+    except Exception as e:
+        print(f"[classify error] {e}", flush=True)
+        return None
+
+
+async def report_outcome_if_ready(peer: str, sender, msgs: list[dict]) -> None:
+    """Classify the chat; on a terminal verdict, push it to the API -> CRM."""
+    user_turns = sum(1 for m in msgs if m.get("role") == "user")
+    if user_turns < 2:  # not enough answered to judge
+        return
+    res = await classify_dialog(msgs)
+    if not res:
+        return
+    verdict = res.get("verdict")
+    if verdict not in ("qualified", "not_fit"):
+        return
+    if store.last_outcome(peer) == verdict:  # already reported
+        return
+
+    phone = None
+    try:
+        phone = getattr(sender, "phone", None)
+        if phone and not str(phone).startswith("+"):
+            phone = "+" + str(phone)
+    except Exception:
+        phone = None
+
+    payload = {
+        "peer_id": peer,
+        "name": " ".join(filter(None, [getattr(sender, "first_name", None),
+                                        getattr(sender, "last_name", None)])) or "",
+        "username": getattr(sender, "username", None),
+        "phone": phone,
+        "verdict": verdict,
+        "region": res.get("region"),
+        "age": res.get("age"),
+        "summary": res.get("summary") or "",
+        "transcript": _history_to_text(msgs)[:6000],
+    }
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(
+                f"{API_URL}/internal/tg-outcome",
+                json=payload,
+                headers={"X-Internal-Token": INTERNAL_API_TOKEN},
+                timeout=aiohttp.ClientTimeout(total=25),
+            ) as r:
+                body = await r.text()
+                print(f"[tg->crm] {verdict} peer={peer} -> {r.status} {body[:160]}", flush=True)
+                if r.status == 200:
+                    store.set_outcome(peer, verdict)
+    except Exception as e:
+        print(f"[tg->crm error] {e}", flush=True)
+
+
 # ------------------------------ listener ------------------------------
 @client.on(events.NewMessage(incoming=True))
 async def on_message(event):
@@ -363,6 +465,7 @@ async def on_message(event):
     await human_typing(sender, reply)
     await event.respond(reply)
     store.log_message(peer, "assistant", reply)
+    await report_outcome_if_ready(peer, sender, store.history(peer))
     print(f"[{getattr(sender, 'first_name', peer)}] {event.raw_text[:50]!r} -> {reply[:50]!r}", flush=True)
 
 

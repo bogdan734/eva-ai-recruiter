@@ -14,10 +14,12 @@ from .schemas import (
     HealthResponse,
     KeyCRMWebhookPayload,
     VapiWebhookPayload,
+    TgOutcomePayload,
     WorkUaInboundPayload,
 )
 from .services import (
     handle_keycrm_event,
+    handle_tg_outcome,
     handle_vapi_event,
     handle_workua_inbound,
 )
@@ -117,3 +119,25 @@ async def get_recording(vapi_call_id: str):
     if not url:
         raise HTTPException(status_code=404, detail="recording not available")
     return RedirectResponse(url)
+
+
+@app.post("/internal/tg-outcome")
+async def tg_outcome(
+    payload: TgOutcomePayload,
+    x_internal_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Called by the Telegram userbot when a chat reaches a verdict."""
+    s = get_settings()
+    if x_internal_token != s.internal_api_token:
+        raise HTTPException(status_code=401, detail="bad internal token")
+    return await handle_tg_outcome(
+        peer_id=payload.peer_id,
+        name=payload.name,
+        username=payload.username,
+        phone=payload.phone,
+        verdict=payload.verdict,
+        region=payload.region,
+        age=payload.age,
+        summary=payload.summary,
+        transcript=payload.transcript,
+    )

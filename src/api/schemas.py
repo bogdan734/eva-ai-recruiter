@@ -90,3 +90,15 @@ class WorkUaInboundPayload(BaseModel):
     work_ua_url: str | None = None
     vacancy_external_id: str | None = None
     source: str = "workua_response"
+
+
+class TgOutcomePayload(BaseModel):
+    peer_id: str
+    name: str = ""
+    username: str | None = None
+    phone: str | None = None
+    verdict: str  # qualified | not_fit
+    region: str | None = None
+    age: int | None = None
+    summary: str = ""
+    transcript: str = ""

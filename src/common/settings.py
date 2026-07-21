@@ -98,6 +98,10 @@ class Settings(BaseSettings):
     # KeyCRM user assigned to every AI-processed lead so recruiters can
     # tell them apart in the list. 0 disables the assignment.
     keycrm_ai_manager_id: int = 7
+    # Shared secret the userbot uses to reach the internal API endpoint.
+    internal_api_token: str = "change-me-internal"
+    # Vacancy link Eva sends at the start of a Telegram chat.
+    vacancy_url: str = "https://www.work.ua/jobs/8249916/"
     company_name: str = "Kozyr Trans"
     company_pitch: str = (
         "Ми займаємося організацією внутрішніх та міжнародних вантажоперевезень."

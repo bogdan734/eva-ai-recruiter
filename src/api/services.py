@@ -59,3 +59,5 @@ async def handle_workua_inbound(payload: WorkUaInboundPayload) -> None:
         candidate_id=result.candidate_id,
         reason=result.reason,
     )
+
+from src.api.tg_outcome import handle_tg_outcome  # noqa: E402,F401

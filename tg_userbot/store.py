@@ -7,6 +7,8 @@ def _conn():
     c = sqlite3.connect(DB)
     c.execute("""CREATE TABLE IF NOT EXISTS contacts(
         peer TEXT PRIMARY KEY, name TEXT, first_sent_at REAL, status TEXT DEFAULT 'contacted')""")
+    c.execute("""CREATE TABLE IF NOT EXISTS outcomes(
+        peer TEXT PRIMARY KEY, verdict TEXT, ts TEXT)""")
     c.execute("""CREATE TABLE IF NOT EXISTS messages(
         id INTEGER PRIMARY KEY AUTOINCREMENT, peer TEXT, role TEXT, text TEXT, ts REAL)""")
     return c
@@ -42,3 +44,20 @@ def history(peer: str, limit: int = 30):
                      (peer, limit)).fetchall()
     c.close()
     return [{"role": r, "content": t} for r, t in reversed(rows)]
+
+
+def last_outcome(peer: str) -> str | None:
+    c = _conn()
+    row = c.execute("SELECT verdict FROM outcomes WHERE peer=?", (peer,)).fetchone()
+    return row[0] if row else None
+
+
+def set_outcome(peer: str, verdict: str) -> None:
+    import datetime as _dt
+    c = _conn()
+    c.execute(
+        "INSERT INTO outcomes(peer,verdict,ts) VALUES(?,?,?) "
+        "ON CONFLICT(peer) DO UPDATE SET verdict=excluded.verdict, ts=excluded.ts",
+        (peer, verdict, _dt.datetime.utcnow().isoformat()),
+    )
+    c.commit()
