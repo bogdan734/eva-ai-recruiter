@@ -89,6 +89,9 @@ class WorkUaClient:
         self._password = password or s.workua_employer_password
         company = company_name or s.company_name or "AI Recruiter"
         contact = contact_email or self._email
+        # HTTP headers must be ASCII; COMPANY_NAME is Cyrillic (needed for correct TTS).
+        if not company.isascii():
+            company = "KozyrTrans"
         ua = f"{company} ({contact})"
         self._client = httpx.AsyncClient(
             base_url=self.BASE,
