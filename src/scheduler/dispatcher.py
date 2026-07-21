@@ -100,6 +100,36 @@ async def _requeue_stuck_calls(max_age_min: int = 15) -> None:
             log.info("scheduler.requeued_stuck count=%d", len(rows))
 
 
+
+async def _catch_up_missed_slot() -> None:
+    """Run a session if a slot was missed while the service was down/redeploying.
+
+    Only inside working hours, and only if a slot time has already passed today —
+    so a restart never turns into an out-of-hours call.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    s = get_settings()
+    now = datetime.now(ZoneInfo(s.app_timezone))
+    slots = []
+    for slot in s.call_slot_times:
+        h, m = slot.split(":")
+        slots.append(now.replace(hour=int(h), minute=int(m), second=0, microsecond=0))
+
+    passed = [t for t in slots if t <= now]
+    if not passed:
+        log.info("scheduler.catchup_skipped reason=before_first_slot")
+        return
+
+    # Do not fire hours after the last slot (e.g. a restart at 23:00).
+    if (now - passed[-1]).total_seconds() > 3600:
+        log.info("scheduler.catchup_skipped reason=too_late_after_slot")
+        return
+
+    log.info("scheduler.catchup_start missed_slot=%s", passed[-1].strftime("%H:%M"))
+    await run_slot()
+
 async def poll_workua_responses() -> None:
     """work.ua API inbound poller — runs every 5 min."""
     from src.bot.admin import workua_paused
@@ -143,6 +173,8 @@ async def _main() -> None:
     logging.basicConfig(level=logging.INFO)
     scheduler = build_scheduler()
     scheduler.start()
+    # A deploy that lands after a slot would otherwise skip it entirely.
+    asyncio.create_task(_catch_up_missed_slot())
     log.info("scheduler.started")
     try:
         await asyncio.Event().wait()
