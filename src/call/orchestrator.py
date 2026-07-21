@@ -337,11 +337,11 @@ class CallOrchestrator:
                 new_stage = STAGE_MAP.get("unreachable")
             else:
                 candidate.status = CandidateStatus.IN_CALL_QUEUE
-                # Someone we already tried is "В роботі"; untouched people stay
-                # in "Новий" so the working stage only holds live cases.
-                new_stage = STAGE_MAP.get(
-                    "in_call_queue" if candidate.call_attempts else "new_resume"
-                )
+                # Do NOT touch the CRM stage for someone we have not actually
+                # spoken to: recruiters park old leads deliberately, and moving
+                # them makes 3-week-old applications look brand new. The calling
+                # queue lives in our DB, not in the CRM stage.
+                new_stage = STAGE_MAP.get("in_call_queue") if summary.spoke_with_candidate else None
 
             # Deferred-KeyCRM mode: create the lead now that we have a
             # verdict, then set the stage to match. Skip creation on clear
