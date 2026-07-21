@@ -334,7 +334,11 @@ class CallOrchestrator:
                 new_stage = STAGE_MAP.get("unreachable")
             else:
                 candidate.status = CandidateStatus.IN_CALL_QUEUE
-                new_stage = STAGE_MAP.get("in_call_queue")
+                # Someone we already tried is "В роботі"; untouched people stay
+                # in "Новий" so the working stage only holds live cases.
+                new_stage = STAGE_MAP.get(
+                    "in_call_queue" if candidate.call_attempts else "new_resume"
+                )
 
             # Deferred-KeyCRM mode: create the lead now that we have a
             # verdict, then set the stage to match. Skip creation on clear
