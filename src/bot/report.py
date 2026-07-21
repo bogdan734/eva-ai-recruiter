@@ -1,10 +1,13 @@
 """Daily report aggregator + markdown formatter.
 
-Reads DB rollups, formats the message exactly as discussed with the client.
-Used by the TG bot at 09:00 Europe/Kyiv to send a digest for the previous day.
+Rewritten 2026-07-21: counts PEOPLE rather than attempts, shows every call
+outcome (120 "failed" calls used to vanish from the report entirely), computes
+real spend from tokens and minutes, breaks intake down by source, and includes
+Telegram outreach.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
@@ -12,145 +15,253 @@ from sqlalchemy import func, select
 
 from src.common.db import session_scope
 from src.common.models import Call, CallStatus, Candidate, CandidateStatus
-from src.cost.tracker import rollup_for_date
+from src.cost.pricing import PRICING
+
+# how a raw source string maps onto something a human wants to read
+SOURCE_LABELS: dict[str, str] = {
+    "workua": "work.ua",
+    "workua_response_send": "work.ua",
+    "workua_api": "work.ua",
+    "robota": "robota.ua",
+    "robotaua": "robota.ua",
+    "inbound_call": "вхідні дзвінки",
+    "manual": "ручний імпорт",
+    "tg_test_call": "тестові",
+}
+
+
+def source_label(raw: str | None) -> str:
+    if not raw:
+        return "невідомо"
+    key = raw.strip().lower()
+    if key in SOURCE_LABELS:
+        return SOURCE_LABELS[key]
+    for prefix, label in (("workua", "work.ua"), ("robota", "robota.ua")):
+        if key.startswith(prefix):
+            return label
+    return raw
 
 
 @dataclass
 class DayReport:
     target_date: date
-    attempts: int = 0
-    success: int = 0
-    no_answer: int = 0
-    hangup: int = 0
-    blocked: int = 0
+    # people, not attempts
+    people_dialed: int = 0
+    people_talked: int = 0
     qualified: int = 0
-    avg_success_sec: int = 0
+    rejected: int = 0
+    dropped_early: int = 0
+    unreachable: int = 0
+    not_connected: int = 0
+    attempts: int = 0
+    avg_talk_sec: int = 0
     total_in_line_sec: int = 0
-    cost_breakdown: dict[str, float] = field(default_factory=dict)
-    scraper_new: int = 0
-    scraper_filtered: int = 0
-    scraper_queued: int = 0
+    cost: dict[str, float] = field(default_factory=dict)
+    intake_by_source: dict[str, int] = field(default_factory=dict)
+    tg_sent_today: int = 0
+    tg_limit: int = 0
+    tg_active: bool = False
     funnel_to_call: int = 0
     funnel_calling: int = 0
     funnel_manager: int = 0
-    funnel_archive_today: int = 0
-    qualified_links: list[dict[str, str]] = field(default_factory=list)
+    funnel_rejected: int = 0
+    funnel_unreachable: int = 0
+    qualified_names: list[str] = field(default_factory=list)
 
 
 def _fmt_duration(seconds: int) -> str:
     if seconds <= 0:
         return "00:00"
-    h, rem = divmod(seconds, 3600)
+    h, rem = divmod(int(seconds), 3600)
     m, s = divmod(rem, 60)
-    if h:
-        return f"{h}:{m:02d}:{s:02d}"
-    return f"{m:02d}:{s:02d}"
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+async def _tg_stats() -> tuple[int, int, bool]:
+    """Live Telegram outreach numbers; never let this break the report."""
+    import json
+    import urllib.request
+
+    url = os.getenv("TGUSERBOT_URL", "http://tguserbot:8090")
+    try:
+        d = json.load(urllib.request.urlopen(f"{url}/stats", timeout=8))
+        return int(d.get("sent_today", 0)), int(d.get("limit", 0)), bool(d.get("active"))
+    except Exception:
+        return 0, 0, False
+
+
+TALK_FLOOR_SEC = 60  # below this nobody actually answered the screening questions
 
 
 async def collect_for(target: date) -> DayReport:
     rep = DayReport(target_date=target)
-    iso = target.isoformat()
+
     async with session_scope() as session:
-        # Calls aggregation
-        rows = await session.execute(
-            select(Call.status, func.count(Call.id), func.coalesce(func.sum(Call.duration_sec), 0)).where(
-                func.date(Call.started_at) == target
-            ).group_by(Call.status)
-        )
-        success_durations: list[int] = []
-        for status, count, total_dur in rows.all():
-            rep.attempts += count
-            rep.total_in_line_sec += int(total_dur or 0)
-            if status == CallStatus.SUCCESS:
-                rep.success = count
-                success_durations.append(int(total_dur or 0))
-            elif status in (CallStatus.NO_ANSWER, CallStatus.BUSY, CallStatus.VOICEMAIL):
-                rep.no_answer += count
-            elif status == CallStatus.HANGUP:
-                rep.hangup = count
-            elif status == CallStatus.BLOCKED:
-                rep.blocked = count
-
-        if success_durations and rep.success:
-            rep.avg_success_sec = int(sum(success_durations) / rep.success)
-
-        # Qualified count (today)
-        qualified_q = await session.execute(
-            select(func.count(Candidate.id)).where(
-                Candidate.status == CandidateStatus.MANAGER_REVIEW,
-                func.date(Candidate.updated_at) == target,
+        # ---- calls of the day, aggregated per person ----
+        rows = (await session.execute(
+            select(
+                Call.candidate_id,
+                func.count(Call.id),
+                func.max(Call.duration_sec),
+                func.sum(Call.duration_sec),
+                func.sum(Call.tokens_input),
+                func.sum(Call.tokens_output),
+                func.max(Call.status),
             )
-        )
-        rep.qualified = int(qualified_q.scalar() or 0)
+            .where(func.date(Call.started_at) == target)
+            .group_by(Call.candidate_id)
+        )).all()
 
-        # Funnel snapshot
-        snap = await session.execute(
+        tokens_in = tokens_out = 0
+        talk_secs: list[int] = []
+        for _cid, n_calls, longest, total_sec, t_in, t_out, _st in rows:
+            rep.attempts += int(n_calls or 0)
+            rep.people_dialed += 1
+            rep.total_in_line_sec += int(total_sec or 0)
+            tokens_in += int(t_in or 0)
+            tokens_out += int(t_out or 0)
+            if (longest or 0) >= TALK_FLOOR_SEC:
+                rep.people_talked += 1
+                talk_secs.append(int(longest))
+            elif (longest or 0) > 0:
+                rep.dropped_early += 1
+            else:
+                rep.not_connected += 1
+
+        if talk_secs:
+            rep.avg_talk_sec = sum(talk_secs) // len(talk_secs)
+
+        # ---- outcomes among the people called that day ----
+        called_ids = [r[0] for r in rows]
+        if called_ids:
+            outcome = (await session.execute(
+                select(Candidate.status, func.count(Candidate.id))
+                .where(Candidate.id.in_(called_ids))
+                .group_by(Candidate.status)
+            )).all()
+            for status, n in outcome:
+                if status == CandidateStatus.MANAGER_REVIEW:
+                    rep.qualified = n
+                elif status == CandidateStatus.CLOSED:
+                    rep.rejected = n
+                elif status == CandidateStatus.UNREACHABLE:
+                    rep.unreachable = n
+
+            names = (await session.execute(
+                select(Candidate.full_name)
+                .where(Candidate.id.in_(called_ids),
+                       Candidate.status == CandidateStatus.MANAGER_REVIEW)
+                .order_by(Candidate.full_name)
+            )).scalars().all()
+            rep.qualified_names = list(names)
+
+        # ---- intake of the day, split by source ----
+        intake = (await session.execute(
+            select(Candidate.source, func.count(Candidate.id))
+            .where(func.date(Candidate.created_at) == target)
+            .group_by(Candidate.source)
+        )).all()
+        for raw, n in intake:
+            label = source_label(raw)
+            rep.intake_by_source[label] = rep.intake_by_source.get(label, 0) + n
+
+        # ---- funnel snapshot (current, not per-day) ----
+        funnel = dict((s, n) for s, n in (await session.execute(
             select(Candidate.status, func.count(Candidate.id)).group_by(Candidate.status)
-        )
-        for status, count in snap.all():
-            if status == CandidateStatus.IN_CALL_QUEUE:
-                rep.funnel_to_call = count
-            elif status == CandidateStatus.CALLING:
-                rep.funnel_calling = count
-            elif status == CandidateStatus.MANAGER_REVIEW:
-                rep.funnel_manager = count
+        )).all())
+        g = lambda st: funnel.get(st, 0)
+        rep.funnel_to_call = g(CandidateStatus.IN_CALL_QUEUE) + g(CandidateStatus.NEW_RESUME)
+        rep.funnel_calling = g(CandidateStatus.CALLING)
+        rep.funnel_manager = g(CandidateStatus.MANAGER_REVIEW)
+        rep.funnel_rejected = g(CandidateStatus.CLOSED)
+        rep.funnel_unreachable = g(CandidateStatus.UNREACHABLE)
 
-    rep.cost_breakdown = await rollup_for_date(target)
+    # ---- spend, computed from what actually happened ----
+    minutes = rep.total_in_line_sec / 60
+    p = PRICING
+    claude = (tokens_in / 1_000_000) * p.haiku_in_per_mtok + (
+        tokens_out / 1_000_000) * p.haiku_out_per_mtok
+    rep.cost = {
+        "claude": round(claude, 2),
+        "deepgram": round(minutes * p.deepgram_per_min, 2),
+        "elevenlabs": round(minutes * p.elevenlabs_per_min, 2),
+        "vapi": round(minutes * p.vapi_per_min, 2),
+        "telephony": round(minutes * p.twilio_per_min, 2),
+    }
+    rep.cost["total"] = round(sum(rep.cost.values()), 2)
+
+    rep.tg_sent_today, rep.tg_limit, rep.tg_active = await _tg_stats()
     return rep
 
 
-def format_report_md(rep: DayReport, keycrm_card_url: str = "") -> str:
-    cb = rep.cost_breakdown
-    total = cb.get("total_usd", 0.0)
-    qualified_section = ""
-    if rep.qualified_links:
-        lines = [
-            f"• {q['name']} ({q['score']}/100) — [картка KeyCRM ↗]({q['url']})"
-            for q in rep.qualified_links
-        ]
-        qualified_section = "\n⭐ Кваліфіковані:\n" + "\n".join(lines) + "\n"
+def format_report_md(rep: DayReport) -> str:
+    def pct(x: int) -> str:
+        return f"{(x / rep.people_dialed * 100):.0f}%" if rep.people_dialed else "0%"
 
-    pct = lambda x: f"{(x / rep.attempts * 100):.1f}%" if rep.attempts else "0.0%"
+    intake_lines = "\n".join(
+        f"├ {label}: {n}" for label, n in sorted(rep.intake_by_source.items())
+    ) or "├ немає нових"
+    if intake_lines and not intake_lines.startswith("├ немає"):
+        # turn the last ├ into └
+        head, _, last = intake_lines.rpartition("├")
+        intake_lines = head + "└" + last
+
+    total_intake = sum(rep.intake_by_source.values())
+    c = rep.cost
+    total = c.get("total", 0.0)
+    per_qualified = (total / rep.qualified) if rep.qualified else 0.0
+
+    qualified_block = ""
+    if rep.qualified_names:
+        qualified_block = "\n⭐ *Кваліфіковані:*\n" + "\n".join(
+            f"• {n}" for n in rep.qualified_names) + "\n"
+
+    tg_state = "активна" if rep.tg_active else "на паузі"
 
     return (
         f"📊 *Звіт за {rep.target_date.strftime('%d.%m.%Y')}*\n"
         f"\n"
-        f"📞 *Дзвінки*\n"
-        f"├ Спроб: {rep.attempts}\n"
-        f"├ ✅ Успішні: {rep.success} ({pct(rep.success)})\n"
-        f"├ ❌ Не відповідає: {rep.no_answer} ({pct(rep.no_answer)})\n"
-        f"├ ⚠️ Скинули: {rep.hangup} ({pct(rep.hangup)})\n"
-        f"├ 🚫 Guardrails: {rep.blocked}\n"
-        f"└ ⭐ Кваліфіковано: {rep.qualified}\n"
+        f"📞 *Обдзвін* (людей, не спроб)\n"
+        f"├ Набирали: {rep.people_dialed} осіб ({rep.attempts} спроб)\n"
+        f"├ 💬 Поговорили: {rep.people_talked} ({pct(rep.people_talked)})\n"
+        f"├ ⭐ Кваліфіковано: {rep.qualified}\n"
+        f"├ 🚫 Не підійшли: {rep.rejected}\n"
+        f"├ ⚠️ Кинули на початку: {rep.dropped_early}\n"
+        f"├ ❌ Не додзвонились: {rep.unreachable}\n"
+        f"└ 🔌 Не з'єдналось: {rep.not_connected}\n"
         f"\n"
         f"⏱ *Час*\n"
-        f"├ Сер. успішний: {_fmt_duration(rep.avg_success_sec)}\n"
+        f"├ Сер. розмова: {_fmt_duration(rep.avg_talk_sec)}\n"
         f"└ Всього в лінії: {_fmt_duration(rep.total_in_line_sec)}\n"
         f"\n"
+        f"📱 *Telegram-переписка*\n"
+        f"├ Написали сьогодні: {rep.tg_sent_today} з {rep.tg_limit}\n"
+        f"└ Стан: {tg_state}\n"
+        f"\n"
+        f"📥 *Нові кандидати: {total_intake}*\n"
+        f"{intake_lines}\n"
+        f"\n"
         f"💰 *Витрати*\n"
-        f"├ Claude: ${cb.get('claude_usd', 0):.2f}\n"
-        f"├ Deepgram: ${cb.get('deepgram_usd', 0):.2f}\n"
-        f"├ ElevenLabs: ${cb.get('elevenlabs_usd', 0):.2f}\n"
-        f"├ Vapi: ${cb.get('vapi_usd', 0):.2f}\n"
-        f"├ Telephony: ${cb.get('telephony_usd', 0):.2f}\n"
-        f"└ *Total: ${total:.2f}*\n"
-        f"   $/qualified: ${(total / rep.qualified) if rep.qualified else 0:.2f}\n"
+        f"├ Claude: ${c.get('claude', 0):.2f}\n"
+        f"├ Deepgram: ${c.get('deepgram', 0):.2f}\n"
+        f"├ ElevenLabs: ${c.get('elevenlabs', 0):.2f}\n"
+        f"├ Vapi: ${c.get('vapi', 0):.2f}\n"
+        f"├ Телефонія: ${c.get('telephony', 0):.2f}\n"
+        f"└ *Разом: ${total:.2f}*  (${per_qualified:.2f} за кваліфікованого)\n"
         f"\n"
-        f"🔍 *Скрапер*\n"
-        f"├ Нових резюме: {rep.scraper_new}\n"
-        f"├ Пройшли фільтр: {rep.scraper_filtered}\n"
-        f"└ В черзі дзвінків: +{rep.scraper_queued}\n"
-        f"\n"
-        f"🎯 *Воронка*\n"
-        f"├ To call: {rep.funnel_to_call}\n"
-        f"├ Calling: {rep.funnel_calling}\n"
-        f"├ → Менеджер: {rep.funnel_manager}\n"
-        f"└ Архів сьогодні: {rep.funnel_archive_today}\n"
-        f"{qualified_section}"
+        f"🎯 *Воронка зараз*\n"
+        f"├ Чекають дзвінка: {rep.funnel_to_call}\n"
+        f"├ В роботі: {rep.funnel_calling}\n"
+        f"├ ⭐ У рекрутера: {rep.funnel_manager}\n"
+        f"├ Не підійшли: {rep.funnel_rejected}\n"
+        f"└ Недозвон: {rep.funnel_unreachable}\n"
+        f"{qualified_block}"
     )
 
 
 async def yesterdays_report() -> str:
-    target = date.today() - timedelta(days=1)
-    rep = await collect_for(target)
-    return format_report_md(rep)
+    return format_report_md(await collect_for(date.today() - timedelta(days=1)))
+
+
+async def todays_report() -> str:
+    return format_report_md(await collect_for(date.today()))
