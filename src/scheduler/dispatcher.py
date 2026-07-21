@@ -143,6 +143,62 @@ async def _catch_up_missed_slot() -> None:
     log.info("scheduler.catchup_start missed_slot=%s", passed[-1].strftime("%H:%M"))
     await run_slot()
 
+
+async def reconcile_unfinalized() -> None:
+    """Finalize calls whose end-of-call webhook never landed (safety net)."""
+    import os
+    from datetime import timedelta
+    import httpx
+    from src.common.models import Call, CallStatus
+    from src.call.orchestrator import CallOrchestrator
+
+    now = datetime.utcnow()
+    lo = now - timedelta(hours=3)          # only recent calls
+    hi = now - timedelta(minutes=3)        # give the webhook a chance first
+    async with session_scope() as sess:
+        rows = (await sess.execute(
+            select(Call.vapi_call_id).where(
+                Call.status == CallStatus.FAILED,
+                Call.vapi_call_id != "",
+                Call.started_at >= lo,
+                Call.started_at <= hi,
+            )
+        )).scalars().all()
+    if not rows:
+        return
+
+    orch = CallOrchestrator()
+    fixed = 0
+    async with httpx.AsyncClient(
+        base_url="https://api.vapi.ai",
+        headers={"Authorization": f"Bearer {os.environ['VAPI_API_KEY']}"},
+        timeout=30,
+    ) as c:
+        for cid in rows:
+            try:
+                r = await c.get(f"/call/{cid}")
+                if r.status_code != 200:
+                    continue
+                d = r.json()
+                if d.get("status") != "ended":
+                    continue
+                dur = 0.0
+                if d.get("startedAt") and d.get("endedAt"):
+                    f = lambda x: datetime.fromisoformat(x.replace("Z", "+00:00"))
+                    dur = (f(d["endedAt"]) - f(d["startedAt"])).total_seconds()
+                await orch.process_end_of_call(
+                    vapi_call_id=cid,
+                    transcript=d.get("transcript") or "",
+                    duration_sec=dur,
+                    recording_url=(d.get("recordingUrl")
+                                   or (d.get("artifact") or {}).get("recordingUrl")),
+                )
+                fixed += 1
+            except Exception as e:
+                log.warning("reconcile.failed", call=cid, error=str(e))
+    if fixed:
+        log.info("reconcile.done fixed=%d of=%d", fixed, len(rows))
+
 async def poll_workua_responses() -> None:
     """work.ua API inbound poller — runs every 5 min."""
     from src.bot.admin import workua_paused
@@ -177,6 +233,13 @@ def build_scheduler() -> AsyncIOScheduler:
         poll_workua_responses,
         trigger=CronTrigger(minute="*/5", timezone=s.app_timezone),
         id="workua_poll",
+        replace_existing=True,
+    )
+    # Safety net: pull any call whose webhook never arrived.
+    scheduler.add_job(
+        reconcile_unfinalized,
+        trigger=CronTrigger(minute="*/10", timezone=s.app_timezone),
+        id="reconcile_calls",
         replace_existing=True,
     )
     return scheduler
