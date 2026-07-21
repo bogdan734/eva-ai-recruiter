@@ -99,6 +99,7 @@ async def main() -> None:
             "provider": "11labs",
             "voiceId": "UrqGMRmIdd73BHEhBvt6",
             "model": "eleven_turbo_v2_5",
+            "language": "uk",
             "optimizeStreamingLatency": 4,
             "stability": 0.5,
             "speed": 1.0,
