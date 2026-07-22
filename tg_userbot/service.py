@@ -369,9 +369,11 @@ Return ONLY a JSON object:
  "region": string|null, "age": integer|null,
  "summary": "1-2 short Ukrainian bullet points of what was learned"}
 
-- "qualified": ONLY if the candidate clearly fits AND you know their region AND
-  their age AND relevant experience AND they agreed to be passed to a recruiter.
-  If region or age is still unknown, it is NOT qualified yet — keep "in_progress".
+- "qualified": ONLY if ALL are true — relevant experience (~1y+), region known,
+  age known, AND the person is ready for FULL-TIME with no side job (if they
+  currently work, they confirmed they will leave it). If any of these is missing or
+  they want to combine with another job, it is NOT qualified — "in_progress" or
+  "not_fit".
 - "not_fit": a real answer shows they do NOT fit (no relevant experience, wrong
   region, side job they will not drop, age outside window).
 - "in_progress": not enough answered yet, or still just greetings/questions.
