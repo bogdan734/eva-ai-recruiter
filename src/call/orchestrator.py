@@ -299,6 +299,17 @@ class CallOrchestrator:
                 )
                 summary.qualified = False
 
+        # Never pass a candidate to the recruiter without the basics. The model
+        # sometimes marks qualified on partial data (experience only, no age/region).
+        if summary.qualified and (not summary.candidate_age or not (summary.candidate_region or (candidate.region if candidate else None))):
+            log.info(
+                "orchestrator.incomplete_qualify",
+                age=summary.candidate_age,
+                region=summary.candidate_region,
+                call_id=db_call.id,
+            )
+            summary.qualified = False
+
         db_call.status = CallStatus.SUCCESS if summary.qualified else CallStatus.HANGUP
 
         # Cold-base promise fulfilment: Єва pledged to send the anketa in Telegram.

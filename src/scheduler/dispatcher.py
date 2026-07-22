@@ -11,11 +11,11 @@ from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from src.call.orchestrator import CallOrchestrator
 from src.common.db import session_scope
-from src.common.models import Candidate, CandidateStatus
+from src.common.models import Call, Candidate, CandidateStatus
 from src.common.settings import get_settings
 
 log = logging.getLogger("recruiter.scheduler")
@@ -23,6 +23,8 @@ log = logging.getLogger("recruiter.scheduler")
 # One slot works the queue in batches; pause lets placed calls finish first.
 SLOT_BATCH_PAUSE_SEC = 120
 SLOT_MAX_BATCHES = 40  # safety cap (~120 candidates per slot)
+HARD_CALL_CAP = 4       # never call one person more than this, ever
+REAL_CONTACT_SEC = 40   # a call this long counts as a real conversation
 CALLING_WINDOW_END_HOUR = 20  # never start a new batch at or after 20:00 local
 
 
@@ -51,6 +53,20 @@ async def run_slot() -> None:
                         )
                     ),
                     Candidate.call_attempts < s.call_max_attempts,
+                    # hard, reset-proof guards computed from the calls table
+                    (
+                        select(func.count(Call.id))
+                        .where(Call.candidate_id == Candidate.id)
+                        .scalar_subquery()
+                    ) < HARD_CALL_CAP,
+                    (
+                        select(func.count(Call.id))
+                        .where(
+                            Call.candidate_id == Candidate.id,
+                            Call.duration_sec >= REAL_CONTACT_SEC,
+                        )
+                        .scalar_subquery()
+                    ) == 0,
                 )
                 .order_by(Candidate.match_score.desc().nulls_last(), Candidate.created_at)
                 .limit(s.call_max_concurrent)

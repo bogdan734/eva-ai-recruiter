@@ -358,8 +358,9 @@ Return ONLY a JSON object:
  "region": string|null, "age": integer|null,
  "summary": "1-2 short Ukrainian bullet points of what was learned"}
 
-- "qualified": the candidate clearly fits the portrait AND agreed to be passed to
-  a recruiter / to an interview.
+- "qualified": ONLY if the candidate clearly fits AND you know their region AND
+  their age AND relevant experience AND they agreed to be passed to a recruiter.
+  If region or age is still unknown, it is NOT qualified yet — keep "in_progress".
 - "not_fit": a real answer shows they do NOT fit (no relevant experience, wrong
   region, side job they will not drop, age outside window).
 - "in_progress": not enough answered yet, or still just greetings/questions.

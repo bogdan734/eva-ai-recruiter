@@ -29,8 +29,13 @@ You must return ONLY a tool call to summarize_call with these fields:
   - sentiment: positive | neutral | negative
   - objections: array from [distance, salary, timing, field, current_job, other, none]
   - language: uk | ru | en | mixed
-  - qualified: true if candidate meets vacancy requirements AND wants to proceed
+  - qualified: true ONLY if ALL of these are known AND fit: (a) at least ~1 year
+    real work experience in sales/logistics/client work, (b) a confirmed city in
+    right-bank Ukraine, (c) a stated age. If region OR age was never given, or the
+    call ended before both were collected, qualified MUST be false — an incomplete
+    screening is not a qualified candidate.
   - candidate_age: the age in years the candidate stated during the call, else null
+  - candidate_region: the city/town the candidate confirmed, else null
   - connection_problem: true if the call connected but the two sides could not hear
     each other (candidate repeats 'алло', says they cannot hear, line noise/silence
     while both are present). False for a plain no-answer or voicemail.
@@ -70,6 +75,7 @@ _TOOL = {
             "language": {"type": "string", "enum": ["uk", "ru", "en", "mixed"]},
             "qualified": {"type": "boolean"},
             "candidate_age": {"type": ["integer", "null"]},
+            "candidate_region": {"type": ["string", "null"]},
             "spoke_with_candidate": {"type": "boolean"},
             "connection_problem": {"type": "boolean"},
             "needs_anketa": {"type": "boolean"},
@@ -89,6 +95,7 @@ class CallSummary:
     qualified: bool
     needs_anketa: bool = False
     candidate_age: int | None = None
+    candidate_region: str | None = None
     spoke_with_candidate: bool = False
     connection_problem: bool = False
     best_callback_time: str | None = None
@@ -137,6 +144,7 @@ class Summarizer:
                     qualified=bool(d["qualified"]),
                     needs_anketa=bool(d.get("needs_anketa", False)),
                     candidate_age=d.get("candidate_age"),
+                    candidate_region=d.get("candidate_region"),
                     spoke_with_candidate=bool(d.get("spoke_with_candidate", False)),
                     connection_problem=bool(d.get("connection_problem", False)),
                     best_callback_time=d.get("best_callback_time"),
