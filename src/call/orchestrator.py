@@ -338,6 +338,10 @@ class CallOrchestrator:
             if summary.qualified:
                 candidate.status = CandidateStatus.MANAGER_REVIEW
                 new_stage = STAGE_MAP.get("manager_review")
+            elif getattr(summary, "time_waster", False):
+                # Not serious — a real conversation but wasted. Close, do not redial.
+                candidate.status = CandidateStatus.CLOSED
+                new_stage = STAGE_MAP.get("closed")
             elif summary.spoke_with_candidate and duration_sec >= 60:
                 # Below a minute nobody has answered the screening questions —
                 # treat it as a dropped call, not a rejection, or we close people
