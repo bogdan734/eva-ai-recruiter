@@ -36,6 +36,10 @@ You must return ONLY a tool call to summarize_call with these fields:
     screening is not a qualified candidate.
   - candidate_age: the age in years the candidate stated during the call, else null
   - candidate_region: the city/town the candidate confirmed, else null
+  - potentially_fit: true if the person showed RELEVANT experience (sales/logistics,
+    ~1y+) and was serious, but the call ended before region AND age were both
+    collected. Worth finishing in a message. False if they clearly do not fit or
+    were a time-waster.
   - time_waster: true if the person was clearly not serious — trolling, absurd
     answers, mocking, refusing to answer while chatting. Such a call is a real
     conversation but the candidate does NOT fit (qualified=false).
@@ -80,6 +84,7 @@ _TOOL = {
             "candidate_age": {"type": ["integer", "null"]},
             "candidate_region": {"type": ["string", "null"]},
             "time_waster": {"type": "boolean"},
+            "potentially_fit": {"type": "boolean"},
             "spoke_with_candidate": {"type": "boolean"},
             "connection_problem": {"type": "boolean"},
             "needs_anketa": {"type": "boolean"},
@@ -101,6 +106,7 @@ class CallSummary:
     candidate_age: int | None = None
     candidate_region: str | None = None
     time_waster: bool = False
+    potentially_fit: bool = False
     spoke_with_candidate: bool = False
     connection_problem: bool = False
     best_callback_time: str | None = None
@@ -151,6 +157,7 @@ class Summarizer:
                     candidate_age=d.get("candidate_age"),
                     candidate_region=d.get("candidate_region"),
                     time_waster=bool(d.get("time_waster", False)),
+                    potentially_fit=bool(d.get("potentially_fit", False)),
                     spoke_with_candidate=bool(d.get("spoke_with_candidate", False)),
                     connection_problem=bool(d.get("connection_problem", False)),
                     best_callback_time=d.get("best_callback_time"),

@@ -338,6 +338,15 @@ class CallOrchestrator:
             if summary.qualified:
                 candidate.status = CandidateStatus.MANAGER_REVIEW
                 new_stage = STAGE_MAP.get("manager_review")
+            elif (
+                getattr(summary, "potentially_fit", False)
+                and summary.spoke_with_candidate
+            ):
+                # Talked, looks promising, but region/age not finished. Do not redial —
+                # finish it in Telegram. If they don't reply, that's fine.
+                candidate.status = CandidateStatus.CALL_DONE
+                new_stage = STAGE_MAP.get("call_done")
+                needs_tg_outreach = "collect_info"
             elif getattr(summary, "time_waster", False):
                 # Not serious — a real conversation but wasted. Close, do not redial.
                 candidate.status = CandidateStatus.CLOSED
