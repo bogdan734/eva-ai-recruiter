@@ -60,6 +60,11 @@ async def main() -> None:
         ],
         "firstMessage": "… Алло! Добрий день!",
         "firstMessageMode": "assistant-speaks-first",
+        # Answering-machine / carrier-announcement handling: Vapi's audio detector
+        # ends the call when it hears a machine instead of a live person; voicemailMessage
+        # stays unset so nothing is left. The prompt also tells Eva to hang up on a
+        # recorded operator message ("абонент недоступний", abroad, etc.).
+        "voicemailDetection": {"provider": "vapi", "beepMaxAwaitSeconds": 0},
         # 120s + idle re-prompts: mitigation for Telnyx WS media-fork bug
         # (inbound track replaced by TTS echo, outbound delayed ~11s) —
         # see /opt/ai-recruiter/debug-20260703-media-fork/REPORT.md

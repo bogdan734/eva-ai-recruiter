@@ -39,17 +39,53 @@ FIELD_MAP: dict[str, int] = {
 # Stage tech_key -> KeyCRM stage id
 # Real status ids of KeyCRM pipeline 1 ("1 Етап Менеджер з продажу").
 # Previously all zeros — the API fill never ran, so no lead ever changed stage.
+#
+# Client funnel semantics (2026-07-22):
+#   2  Відібрано      — matched the portrait, waiting for a call or being called
+#   3  В роботі       — already talked/chatted AND selected for the recruiter/interview
+#   31 Недозвін       — 2 calls + 1 message, no answer
+#   32 Не актуально   — not interested / found a job / no answer after all attempts
+#   33 Не підходить   — rude / bad behaviour / clearly unsuitable by conduct
+#   34 Не ЦА          — off-portrait from the start (region / age / no relevant experience)
+#   10 Запросили на 1 тур
 STAGE_MAP: dict[str, int] = {
-    "new_resume": 1,          # Новий
+    "new_resume": 2,          # Відібрано — matched portrait, waiting for call
     "filtered": 2,            # Відібрано
-    "in_call_queue": 3,       # В роботі
-    "calling": 3,             # В роботі
-    "unreachable": 31,        # Недозвін
-    "call_done": 3,           # В роботі
-    "manager_review": 2,      # Відібрано — Єва передала рекрутеру на розгляд
+    "in_call_queue": 2,       # Відібрано — in the calling pool
+    "calling": 2,             # Відібрано — being called
+    "call_done": 2,           # Відібрано — talked, still collecting / TG follow-up
+    "manager_review": 3,      # В роботі — talked/qualified, handed to the recruiter
+    "unreachable": 31,        # Недозвін — 2 calls + message, no answer
+    "not_actual": 32,         # Не актуально — not interested / found job / no answer
+    "we_rejected": 33,        # Не підходить нам — rude / bad behaviour
+    "not_target": 34,         # Не ЦА — off-portrait (region/age/no relevant experience)
     "interview_scheduled": 10,  # Запросили на 1 тур
-    "closed": 33,             # Не підходить нам
+    # legacy alias: any leftover "closed" path defaults to Не актуально
+    "closed": 32,
 }
+
+
+# Reverse view for the CRM→our sync. Which LIVE card stages mean "a recruiter now
+# owns or has dispositioned this candidate → Eva must stop"? Stages 1 Новий / 2 Відібрано
+# / 31 Недозвін are Eva's own working stages → she continues. Everything else stops her.
+_CRM_STAGE_STOP: dict[int, str] = {
+    3: "manager_review",       # В роботі — recruiter took over
+    4: "manager_review",       # Дійшов на 1 тур
+    30: "manager_review",      # Підтвердили участь
+    10: "interview_scheduled",  # Запросили на 1 тур
+    5: "closed",               # Не підтвердили участь
+    32: "closed",              # Не актуально
+    33: "closed",              # Не підходить нам
+    34: "closed",              # Не ЦА
+    82: "closed",              # Кадровий резерв
+}
+
+
+def crm_stage_stop_status(status_id: int | None) -> str | None:
+    """Given a card's live KeyCRM status_id, return the local candidate status Eva
+    should move to because a recruiter took over or dispositioned the card — or None if
+    the stage is still one of Eva's own working stages (1 Новий / 2 Відібрано / 31 Недозвін)."""
+    return _CRM_STAGE_STOP.get(status_id) if status_id is not None else None
 
 
 def build_lead_payload(

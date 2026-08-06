@@ -11,7 +11,40 @@ def _conn():
         peer TEXT PRIMARY KEY, verdict TEXT, ts TEXT)""")
     c.execute("""CREATE TABLE IF NOT EXISTS messages(
         id INTEGER PRIMARY KEY AUTOINCREMENT, peer TEXT, role TEXT, text TEXT, ts REAL)""")
+    # peer -> real phone we outreached to. Lets a reply from a hidden-number account
+    # dedupe onto the existing candidate/CRM card instead of minting a synthetic one.
+    c.execute("""CREATE TABLE IF NOT EXISTS peer_phone(
+        peer TEXT PRIMARY KEY, phone TEXT, name TEXT, ts REAL)""")
+    # Why each outreach attempt succeeded or failed. Container logs die on rebuild,
+    # so the only way to size problems like PRIVACY_PREMIUM_REQUIRED is to persist it.
+    c.execute("""CREATE TABLE IF NOT EXISTS outreach_log(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT, kind TEXT,
+        ok INTEGER, reason TEXT, ts REAL)""")
     return c
+
+
+def log_outreach(phone: str, kind: str, ok: bool, reason: str = "") -> None:
+    c = _conn()
+    c.execute("INSERT INTO outreach_log(phone,kind,ok,reason,ts) VALUES(?,?,?,?,?)",
+              (phone, kind, 1 if ok else 0, reason[:200], time.time()))
+    c.commit(); c.close()
+
+
+def outreach_stats(days: int = 30) -> dict:
+    c = _conn()
+    since = time.time() - days * 86400
+    rows = c.execute(
+        "SELECT ok, reason, COUNT(*) FROM outreach_log WHERE ts>=? GROUP BY ok, reason",
+        (since,)).fetchall()
+    c.close()
+    out = {"days": days, "sent": 0, "failed": 0, "by_reason": {}}
+    for ok, reason, n in rows:
+        if ok:
+            out["sent"] += n
+        else:
+            out["failed"] += n
+            out["by_reason"][reason or "unknown"] = out["by_reason"].get(reason or "unknown", 0) + n
+    return out
 
 def already_contacted(peer: str) -> bool:
     c = _conn()
@@ -61,3 +94,25 @@ def set_outcome(peer: str, verdict: str) -> None:
         (peer, verdict, _dt.datetime.utcnow().isoformat()),
     )
     c.commit()
+
+
+def set_peer_phone(peer: str, phone: str, name: str = "") -> None:
+    """Remember the real phone we used to reach this Telegram peer."""
+    if not peer or not phone:
+        return
+    c = _conn()
+    c.execute(
+        "INSERT INTO peer_phone(peer,phone,name,ts) VALUES(?,?,?,?) "
+        "ON CONFLICT(peer) DO UPDATE SET phone=excluded.phone, "
+        "name=CASE WHEN excluded.name<>'' THEN excluded.name ELSE peer_phone.name END, "
+        "ts=excluded.ts",
+        (peer, phone, name or "", time.time()),
+    )
+    c.commit(); c.close()
+
+
+def get_peer_phone(peer: str) -> str | None:
+    c = _conn()
+    row = c.execute("SELECT phone FROM peer_phone WHERE peer=?", (peer,)).fetchone()
+    c.close()
+    return row[0] if row else None

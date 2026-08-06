@@ -37,6 +37,8 @@ from src.common.models import Candidate, CandidateStatus
 from src.common.phone import normalize_phone
 from src.common.regions import is_region_allowed, normalize_region
 from src.common.settings import get_settings
+from src.common import vacancies
+from src.match.name_origin import is_slavic_name
 
 
 def _defer_keycrm() -> bool:
@@ -64,6 +66,9 @@ class IngestPayload:
     match_score: float | None = None
     vacancy_id: int | None = None
     vacancy_name: str = "Менеджер з продажу"
+    # Which vacancy of `src.common.vacancies` the person applied to. Decides the
+    # KeyCRM funnel, whether the screening filters run and whether Єва calls.
+    vacancy_key: str = vacancies.DEFAULT.key
 
 
 @dataclass
@@ -98,17 +103,45 @@ class InboundRouter:
         self._settings = get_settings()
 
     async def ingest(self, payload: IngestPayload) -> IngestResult:
+        route = vacancies.get(payload.vacancy_key)
+
+        # Last line of defence against duplicating another system's funnel. The
+        # pullers already skip these vacancies; this catches anything that slips
+        # through a manual call or a stale env allowlist.
+        if vacancies.intake_blocked(route):
+            log.info(
+                "ingest.vacancy_intake_disabled",
+                vacancy=route.key,
+                name=payload.full_name,
+            )
+            return IngestResult(accepted=False, reason=f"intake_disabled: {route.key}")
+
         phone = normalize_phone(payload.phone_raw)
         if not phone:
             return IngestResult(accepted=False, reason="invalid_phone")
 
         region = normalize_region(payload.region_raw or "")
-        if region and not is_region_allowed(
-            region, self._settings.regions_allowed, self._settings.regions_blocked
-        ):
-            return IngestResult(accepted=False, reason=f"region_blocked: {region}")
 
-        # Local dedup
+        # Screening gates belong to the vacancies Єва actually calls. An
+        # intake-only vacancy (e.g. «Бухгалтер») has its own geo and its own
+        # portrait, and a human works the card — filtering here would silently
+        # drop people the recruiter wants to see.
+        if route.screen_enabled:
+            if region and not is_region_allowed(
+                region, self._settings.regions_allowed, self._settings.regions_blocked
+            ):
+                return IngestResult(accepted=False, reason=f"region_blocked: {region}")
+
+            # Name-origin gate: only Ukrainian/Slavic candidates go into auto-dial (cyrillic
+            # or latin alike). Foreign-origin or uncertain names are skipped BEFORE any card
+            # or call — no card, no dial, on to the next candidate. Doubt → skip.
+            if not await is_slavic_name(payload.full_name):
+                log.info("ingest.name_skipped", name=payload.full_name, phone=phone)
+                return IngestResult(accepted=False, reason="name_not_slavic")
+
+        # Local dedup. `phone_e164` is unique, so one person is one row no matter
+        # how many vacancies they apply to.
+        reused_existing = False
         async with session_scope() as session:
             existing = (
                 await session.execute(select(Candidate).where(Candidate.phone_e164 == phone))
@@ -116,15 +149,59 @@ class InboundRouter:
             if existing:
                 if existing.source != payload.source and payload.source not in existing.source:
                     existing.source = f"{existing.source},{payload.source}"
-                return IngestResult(
-                    accepted=True,
-                    duplicate=True,
-                    candidate_id=existing.id,
-                    keycrm_lead_id=existing.keycrm_lead_id,
-                    reason="local_duplicate",
-                )
+                # For a vacancy Єва works, a known phone means we are done — she
+                # is already handling this person. For an intake-only vacancy the
+                # card lives in a DIFFERENT funnel worked by a different person,
+                # so having met this phone before must not stop us; fall through
+                # and let the per-funnel CRM check decide.
+                if route.calls_enabled:
+                    return IngestResult(
+                        accepted=True,
+                        duplicate=True,
+                        candidate_id=existing.id,
+                        keycrm_lead_id=existing.keycrm_lead_id,
+                        reason="local_duplicate",
+                    )
+                # A card we already made is the one reliable duplicate signal we
+                # have: KeyCRM cannot filter cards by phone at all (that endpoint
+                # answers 400 — see find_lead_by_phone). But the id has to be
+                # CHECKED, not trusted: recruiters delete cards from the UI, and a
+                # stale id used to mean "already handled" forever, which hid 21
+                # accountants from the funnel on 2026-08-05.
+                stale_lead_id = int(existing.keycrm_lead_id or 0)
+                if stale_lead_id:
+                    try:
+                        pid = await self._keycrm.card_pipeline(stale_lead_id)
+                    except Exception:
+                        # Fail closed: an unreachable CRM must not be read as
+                        # "the card is gone" — that way lies duplicates again.
+                        return IngestResult(
+                            accepted=False,
+                            candidate_id=existing.id,
+                            reason="card_check_unavailable",
+                        )
+                    if pid == route.keycrm_pipeline_id:
+                        return IngestResult(
+                            accepted=True,
+                            duplicate=True,
+                            candidate_id=existing.id,
+                            keycrm_lead_id=stale_lead_id,
+                            reason="local_duplicate",
+                        )
+                    # Deleted, or living in another funnel that this recruiter
+                    # never opens. Either way they need a card here.
+                    log.info(
+                        "ingest.stale_card_reissue",
+                        candidate_id=existing.id,
+                        old_lead_id=stale_lead_id,
+                        found_in_pipeline=pid,
+                        vacancy=route.key,
+                    )
+                    existing.keycrm_lead_id = None
+                reused_existing = True
+                new_candidate_id = existing.id
 
-            candidate = Candidate(
+            candidate = None if reused_existing else Candidate(
                 full_name=payload.full_name.strip(),
                 phone_e164=phone,
                 email=(payload.email or "").lower() or None,
@@ -133,18 +210,29 @@ class InboundRouter:
                 experience_years=payload.experience_years,
                 languages=payload.languages,
                 work_ua_url=payload.work_ua_url,
+                resume_text=payload.resume_text,
                 source=payload.source,
                 match_score=payload.match_score,
                 vacancy_id=payload.vacancy_id,
-                status=CandidateStatus.NEW_RESUME,
+                # MANAGER_REVIEW keeps intake-only candidates out of the dialer:
+                # the dispatcher only picks NEW_RESUME / IN_CALL_QUEUE, and the
+                # CRM stage sweep ignores this status too.
+                status=(
+                    CandidateStatus.NEW_RESUME
+                    if route.calls_enabled
+                    else CandidateStatus.MANAGER_REVIEW
+                ),
             )
-            session.add(candidate)
-            await session.flush()
-            new_candidate_id = candidate.id
+            if candidate is not None:
+                session.add(candidate)
+                await session.flush()
+                new_candidate_id = candidate.id
 
         # Deferred mode: skip KeyCRM entirely at ingest. Orchestrator will
-        # create the lead post-call when Єва has a qualified verdict.
-        if _defer_keycrm():
+        # create the lead post-call when Єва has a qualified verdict. Only
+        # applies where a call actually happens — for an intake-only vacancy
+        # deferring would mean the card is never created at all.
+        if route.calls_enabled and _defer_keycrm():
             log.info(
                 "inbound.local_only",
                 candidate_id=new_candidate_id,
@@ -158,16 +246,34 @@ class InboundRouter:
             )
 
         # Eager mode — original behaviour.
-        try:
-            remote = await self._keycrm.find_lead_by_phone(phone)
-        except Exception as e:
-            log.warning("keycrm.dedup_failed", error=str(e))
-            remote = None
+        #
+        # Intake-only vacancies deliberately do NOT ask KeyCRM here. Their
+        # duplicate check is the card_pipeline() lookup above, which is
+        # authoritative; this endpoint cannot answer a phone question at all
+        # (HTTP 400 — see find_lead_by_phone), so calling it would only ever
+        # raise and, combined with failing closed, block every single card.
+        remote = None
+        if route.calls_enabled:
+            try:
+                remote = await self._keycrm.find_lead_by_phone(phone)
+            except Exception as e:
+                # FAIL CLOSED. This used to swallow the error and carry on with
+                # remote=None — "no duplicate found" — so a rate-limited or
+                # broken lookup produced another card for the same person on
+                # every poll. Skipping costs a cycle; guessing costs cleanup.
+                log.error(
+                    "keycrm.dedup_failed_skipping", error=str(e), phone=phone[:6] + "***"
+                )
+                return IngestResult(
+                    accepted=False,
+                    candidate_id=new_candidate_id,
+                    reason=f"dedup_unavailable:{type(e).__name__}",
+                )
 
         if remote:
             async with session_scope() as session:
                 cand_db = await session.get(Candidate, new_candidate_id)
-                if cand_db:
+                if cand_db and not cand_db.keycrm_lead_id:
                     cand_db.keycrm_lead_id = int(remote.get("id") or 0)
             return IngestResult(
                 accepted=True,
@@ -183,14 +289,17 @@ class InboundRouter:
                 full_name=payload.full_name,
                 phone=phone,
                 email=payload.email,
-                vacancy_name=payload.vacancy_name,
+                vacancy_name=route.label or payload.vacancy_name,
                 workua_response_id=payload.workua_response_id,
                 resume_text=payload.resume_text,
                 resume_url=payload.work_ua_url,
                 manager_comment=_format_manager_comment(payload, region),
-                pipeline_id=FUNNEL_ID,
-                status_id=STATUS_NEW,
+                pipeline_id=route.keycrm_pipeline_id or FUNNEL_ID,
+                status_id=route.keycrm_status_id or STATUS_NEW,
                 manager_id=DEFAULT_MANAGER_ID,
+                # Intake-only cards must look like the sales funnel's: contact
+                # present but NOT saved as a client, so the recruiter chooses.
+                save_buyer=route.calls_enabled,
             )
             lead_id = int(created.get("id") or 0)
         except Exception as e:
@@ -203,9 +312,23 @@ class InboundRouter:
 
         async with session_scope() as session:
             cand_db = await session.get(Candidate, new_candidate_id)
-            if cand_db:
+            # Only claim the slot if it is free. A candidate who already has a
+            # card from a vacancy Єва works keeps pointing at THAT card — the
+            # orchestrator writes call results there. The accountant card is a
+            # second card in another funnel, worked by a human, and nothing in
+            # our code needs to find it again.
+            if cand_db and not cand_db.keycrm_lead_id:
                 cand_db.keycrm_lead_id = lead_id
 
+        log.info(
+            "inbound.card_created",
+            candidate_id=new_candidate_id,
+            lead_id=lead_id,
+            vacancy=route.key,
+            pipeline=route.keycrm_pipeline_id,
+            stage=route.keycrm_status_id,
+            calls=route.calls_enabled,
+        )
         return IngestResult(
             accepted=True,
             candidate_id=new_candidate_id,

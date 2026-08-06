@@ -14,6 +14,7 @@ import anthropic
 import structlog
 
 from src.common.settings import get_settings
+from src.cost import usage
 
 log = structlog.get_logger()
 
@@ -80,6 +81,7 @@ class MatchScorer:
             tool_choice={"type": "tool", "name": "score_match"},
             messages=[{"role": "user", "content": user_msg}],
         )
+        await usage.record(usage.SCORER, resp.usage, model=self._model)
         for block in resp.content:
             if block.type == "tool_use" and block.name == "score_match":
                 data = block.input

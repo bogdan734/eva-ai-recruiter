@@ -31,8 +31,11 @@ You must return ONLY a tool call to summarize_call with these fields:
   - language: uk | ru | en | mixed
   - qualified: true ONLY if ALL of these are known AND fit: (a) at least ~1 year
     real work experience in sales/logistics/client work, (b) a confirmed city in
-    right-bank Ukraine, (c) a stated age. If region OR age was never given, or the
-    call ended before both were collected, qualified MUST be false — an incomplete
+    one of these oblasts ONLY — Житомирська, Хмельницька, Тернопільська, Львівська, Івано-Франківська, Закарпатська, Чернівецька, Рівненська, Волинська, Черкаська, Одеська. Any other oblast does not fit, including
+    Kyiv city AND the whole Kyiv oblast, and Vinnytsia oblast.
+    Do NOT reason about "right bank" or geography — use this list literally,
+    (c) a stated age. If region OR age was never given, or the call
+    ended before both were collected, qualified MUST be false — an incomplete
     screening is not a qualified candidate.
   - candidate_age: the age in years the candidate stated during the call, else null
   - candidate_region: the city/town the candidate confirmed, else null
@@ -54,6 +57,17 @@ You must return ONLY a tool call to summarize_call with these fields:
   - needs_anketa: true if the agent promised to send an anketa/form link in Telegram
     (candidate was told the form would be sent), or the candidate agreed to fill a form
   - best_callback_time: ISO datetime string if a callback was requested, else null
+  - reject_reason: WHY the candidate does not fit — one of:
+      "not_target"     — off-portrait from the start: city NOT in the allowed oblast
+                         list above (which excludes the city of Kyiv itself, and
+                         Sumy, Zaporizhzhia, Kherson, Donetsk), age outside ~23-42,
+                         or NO relevant sales/logistics experience at all (only
+                         courses/studying). Anyone who never matched the target profile.
+      "misbehaved"     — rude, abusive, trolling, mocking, insulting.
+      "not_interested" — fits or plausibly fits, but declines: already found a job, not
+                         interested, refuses full-time / wants to combine with another job.
+      "none"           — qualified, or still in progress (no rejection decided).
+    Pick the SINGLE best reason. If qualified=true, use "none".
 """
 
 _TOOL = {
@@ -89,6 +103,10 @@ _TOOL = {
             "connection_problem": {"type": "boolean"},
             "needs_anketa": {"type": "boolean"},
             "best_callback_time": {"type": ["string", "null"]},
+            "reject_reason": {
+                "type": "string",
+                "enum": ["not_target", "misbehaved", "not_interested", "none"],
+            },
         },
         "required": ["summary", "sentiment", "objections", "language", "qualified"],
     },
@@ -110,6 +128,7 @@ class CallSummary:
     spoke_with_candidate: bool = False
     connection_problem: bool = False
     best_callback_time: str | None = None
+    reject_reason: str = "none"
     tokens_in: int = 0
     tokens_out: int = 0
 
@@ -161,6 +180,7 @@ class Summarizer:
                     spoke_with_candidate=bool(d.get("spoke_with_candidate", False)),
                     connection_problem=bool(d.get("connection_problem", False)),
                     best_callback_time=d.get("best_callback_time"),
+                    reject_reason=str(d.get("reject_reason", "none")),
                     tokens_in=resp.usage.input_tokens,
                     tokens_out=resp.usage.output_tokens,
                 )

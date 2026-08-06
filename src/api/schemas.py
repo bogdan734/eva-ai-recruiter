@@ -35,6 +35,7 @@ class VapiWebhookPayload(BaseModel):
     transcript: str | None = None
     recording_url: str | None = None
     duration_sec: float | None = None
+    ended_reason: str | None = None
     cost: Any = None  # Vapi sends a float here, older docs said object
     analysis: dict[str, Any] | None = None
     raw: dict[str, Any] | None = None
@@ -74,6 +75,9 @@ class VapiWebhookPayload(BaseModel):
             "duration_sec": data.get("duration_sec")
             or src.get("durationSeconds")
             or src.get("duration_sec"),
+            "ended_reason": data.get("ended_reason")
+            or src.get("endedReason")
+            or call.get("endedReason"),
             "cost": data.get("cost") or src.get("cost"),
             "analysis": data.get("analysis") or src.get("analysis"),
             "raw": data,
@@ -98,7 +102,27 @@ class TgOutcomePayload(BaseModel):
     username: str | None = None
     phone: str | None = None
     verdict: str  # qualified | not_fit
+    reason: str = "none"  # not_target | misbehaved | not_interested | none
     region: str | None = None
     age: int | None = None
     summary: str = ""
+    transcript: str = ""
+
+
+class TokenUsagePayload(BaseModel):
+    """Anthropic usage reported by a service that has no database of its own —
+    today only the Telegram userbot, which runs in its own container on SQLite."""
+    component: str = "tg_userbot"
+    model: str = ""
+    tokens_input: int = 0
+    tokens_output: int = 0
+
+
+class TgProgressPayload(BaseModel):
+    """A live (non-terminal) Telegram chat update — keeps the CRM card's transcript
+    current before a verdict, for candidates that already have a card."""
+    peer_id: str
+    name: str = ""
+    username: str | None = None
+    phone: str | None = None
     transcript: str = ""

@@ -40,10 +40,14 @@ _CRIT_ENV = {
 }
 
 
-# Available outbound trunks (both carry the same verified UA CLI +380673350196)
+# Available outbound trunks. They show DIFFERENT numbers to the candidate —
+# switching here changes the caller ID, so do not treat them as interchangeable.
+# (The old comment here claimed both carried +380673350196; that was wrong.)
 _TRUNKS = {
-    "streamtele": ("5284b036-c03c-4455-a53a-57819d0c3c3b", "StreamTelecom 093 (бойовий)"),
-    "ringostat": ("d4c72be0-8db7-41f3-8586-acf28a5afb4e", "Ringostat (резерв)"),
+    # StreamTelecom, credential 6f7adf61 — the live one.
+    "streamtele": ("5284b036-c03c-4455-a53a-57819d0c3c3b", "StreamTelecom +380935824369 (бойовий)"),
+    # Ringostat FMC, credential 376be354 — different CLI.
+    "ringostat": ("d4c72be0-8db7-41f3-8586-acf28a5afb4e", "Ringostat +380673350196 (резерв)"),
 }
 
 

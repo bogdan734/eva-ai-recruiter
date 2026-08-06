@@ -43,6 +43,14 @@ API_URL = os.environ.get("API_URL", "http://api:8000")
 INTERNAL_API_TOKEN = os.environ.get("INTERNAL_API_TOKEN", "change-me-internal")
 SYSTEM_PROMPT = _BASE_PROMPT.replace("{VACANCY_URL}", VACANCY_URL)
 
+# Debounce: coalesce a burst of rapid messages from one peer into a single reply.
+TG_DEBOUNCE_SEC = float(os.environ.get("TG_DEBOUNCE_SEC", "6"))
+TG_CATCHUP_ON_START = os.environ.get("TG_CATCHUP_ON_START", "1") not in ("0", "false", "no")
+# Bot admins (recruiters) share this Telegram account's inbox. They are colleagues,
+# not candidates — Eva must never run the screening script at them.
+TG_ADMIN_PEERS = {p.strip() for p in os.environ.get("TG_ADMIN_CHAT_IDS", "").split(",") if p.strip()}
+_peer_seq: dict[str, int] = {}
+
 
 # ------------------------------ runtime state ------------------------------
 def _load_state() -> dict:
@@ -121,6 +129,7 @@ async def do_send_form(phone: str, name: str) -> dict:
     peer = str(entity.id)
     if not store.already_contacted(peer):
         store.mark_contacted(peer, name or phone)
+    store.set_peer_phone(peer, phone, name)
     store.log_message(peer, "assistant", text)
     return {"ok": True, "sent_to": phone, "peer_id": entity.id}
 
@@ -165,6 +174,20 @@ OUTREACH_TEMPLATES = {
 }
 
 
+def _given_name(full_name: str | None) -> str:
+    """Pull the GIVEN name out of a job-board full name.
+
+    Ukrainian boards store "Прізвище Ім'я По-батькові", so taking the first token
+    greeted people by surname ("Доброго дня, Вдович!"). With three parts the given
+    name is the middle one; with two it is ambiguous, so we greet without a name
+    rather than risk the surname again.
+    """
+    parts = [p for p in (full_name or "").replace(",", " ").split() if p]
+    if len(parts) >= 3:
+        return parts[1]
+    return ""
+
+
 async def do_send_outreach(phone: str, name: str, kind: str) -> dict:
     """Message someone we failed to reach by phone."""
     tpl = OUTREACH_TEMPLATES.get(kind)
@@ -203,7 +226,7 @@ async def do_send_outreach(phone: str, name: str, kind: str) -> dict:
     if store.already_contacted(peer):
         return {"ok": False, "error": "Вже писали цьому кандидату (анти-спам)"}
 
-    first = (name or "").split()[0] if name else ""
+    first = _given_name(name)
     text = tpl.format(name_part=f", {first}" if first else "", phone=WORK_PHONE)
     try:
         await human_typing(entity, text)
@@ -211,11 +234,20 @@ async def do_send_outreach(phone: str, name: str, kind: str) -> dict:
     except PeerFloodError:
         STATE["active"] = False
         _save_state(STATE)
+        store.log_outreach(phone, kind, False, "peer_flood")
         return {"ok": False, "error": "PeerFloodError — акаунт обмежено"}
     except UserPrivacyRestrictedError:
+        store.log_outreach(phone, kind, False, "privacy_restricted")
         return {"ok": False, "error": "приватність: не приймає повідомлення"}
     except FloodWaitError as e:
+        store.log_outreach(phone, kind, False, f"flood_wait_{e.seconds}s")
         return {"ok": False, "error": f"FloodWait {e.seconds}s"}
+    except Exception as e:
+        # PRIVACY_PREMIUM_REQUIRED (403) lands here — Telegram now demands Premium to
+        # message some users first. Uncaught, it used to 500 the whole HTTP request.
+        code = "privacy_premium_required" if "PREMIUM" in str(e).upper() else f"other: {e}"
+        store.log_outreach(phone, kind, False, code)
+        return {"ok": False, "error": code}
     finally:
         if imported:
             try:
@@ -223,7 +255,9 @@ async def do_send_outreach(phone: str, name: str, kind: str) -> dict:
             except Exception:
                 pass
 
+    store.log_outreach(phone, kind, True, "")
     store.mark_contacted(peer, name or phone)
+    store.set_peer_phone(peer, phone, name)
     store.log_message(peer, "assistant", text)
     return {"ok": True, "kind": kind, "sent_to": phone, "sent_today": store.sent_today()}
 
@@ -351,6 +385,8 @@ def build_web_app() -> web.Application:
         web.post("/send_outreach", h_send_outreach),
         web.post("/toggle", h_toggle),
         web.post("/limit", h_limit),
+        web.post("/catchup", h_catchup),
+        web.get("/outreach_stats", h_outreach_stats),
     ])
     return app
 
@@ -360,12 +396,18 @@ def build_web_app() -> web.Application:
 _CLASSIFY_SYSTEM = """You read a recruiting chat between Eva (assistant) and a
 candidate for a B2B logistics-sales manager role at Kozyr Trans. Decide the
 outcome so far. Portrait: at least ~1 year real work experience in sales /
-logistics / client work (courses or studying do NOT count); lives in
-right-bank Ukraine (not Kyiv, Sumy, Zaporizhzhia, Kherson, Donetsk obl.);
+logistics / client work (courses or studying do NOT count); lives in ONE of these
+oblasts — Житомирська, Хмельницька, Тернопільська, Львівська, Івано-Франківська, Закарпатська, Чернівецька, Рівненська, Волинська, Черкаська, Одеська. Any other oblast does not fit, including Kyiv city AND the whole
+Kyiv oblast, and Vinnytsia oblast. Use this list LITERALLY — never reason about
+"right bank" or geography, and never invent extra excluded cities.
+If the chat mentions the candidate was already rejected before (on a call, or the
+candidate says "you told me you don't take people from X"), IGNORE that claim — some
+earlier rejections were wrong. Judge the region ONLY against the list above;
 age roughly 23-42; ready for full-time with NO side job.
 
 Return ONLY a JSON object:
 {"verdict": "qualified" | "not_fit" | "in_progress",
+ "reason": "not_target" | "misbehaved" | "not_interested" | "none",
  "region": string|null, "age": integer|null,
  "summary": "1-2 short Ukrainian bullet points of what was learned"}
 
@@ -377,7 +419,15 @@ Return ONLY a JSON object:
 - "not_fit": a real answer shows they do NOT fit (no relevant experience, wrong
   region, side job they will not drop, age outside window).
 - "in_progress": not enough answered yet, or still just greetings/questions.
-Be conservative: only "qualified"/"not_fit" when the chat truly reached it."""
+Be conservative: only "qualified"/"not_fit" when the chat truly reached it.
+
+reason (meaningful only when verdict="not_fit"; else "none"):
+- "not_target"     — off-portrait from the start: oblast NOT in the allowed list above
+                     (excludes the city of Kyiv, and Sumy/Zaporizhzhia/Kherson/Donetsk),
+                     age outside ~23-42, or no relevant experience (courses only).
+- "misbehaved"     — rude, trolling, insulting, mocking.
+- "not_interested" — fits or might fit but declines: found a job, not interested,
+                     refuses full-time / wants to combine with another job."""
 
 
 def _history_to_text(msgs: list[dict]) -> str:
@@ -395,6 +445,7 @@ async def classify_dialog(msgs: list[dict]) -> dict | None:
             model=MODEL, max_tokens=250, system=_CLASSIFY_SYSTEM,
             messages=[{"role": "user", "content": _history_to_text(msgs)}],
         )
+        await _report_tokens(resp)
         raw = resp.content[0].text.strip()
         start, end = raw.find("{"), raw.rfind("}")
         if start == -1 or end == -1:
@@ -426,6 +477,11 @@ async def report_outcome_if_ready(peer: str, sender, msgs: list[dict]) -> None:
             phone = "+" + str(phone)
     except Exception:
         phone = None
+    if not phone:
+        # Hidden number — but if WE reached out to this peer by phone earlier, reuse
+        # it so the chat dedupes onto the real candidate/CRM card instead of a
+        # synthetic tg<id> one (fixes duplicates + "only a nickname" cards).
+        phone = store.get_peer_phone(peer)
 
     payload = {
         "peer_id": peer,
@@ -434,6 +490,7 @@ async def report_outcome_if_ready(peer: str, sender, msgs: list[dict]) -> None:
         "username": getattr(sender, "username", None),
         "phone": phone,
         "verdict": verdict,
+        "reason": res.get("reason") or "none",
         "region": res.get("region"),
         "age": res.get("age"),
         "summary": res.get("summary") or "",
@@ -456,6 +513,91 @@ async def report_outcome_if_ready(peer: str, sender, msgs: list[dict]) -> None:
 
 
 # ------------------------------ listener ------------------------------
+# NB: this is a helper called from on_message — NOT an event handler. Telethon
+# dispatches handlers with a single `event` arg, so registering it here would
+# raise TypeError on every incoming message. The @client.on decorator belongs on
+# on_message below.
+async def _push_progress(peer: str, sender, msgs: list[dict]) -> None:
+    """Best-effort: keep an existing CRM card's transcript current with the live chat, so
+    a recruiter can read it before a verdict and it survives the candidate deleting the
+    chat. No-op server-side for candidates without a card yet."""
+    try:
+        payload = {
+            "peer_id": peer,
+            "name": " ".join(filter(None, [getattr(sender, "first_name", None),
+                                            getattr(sender, "last_name", None)])) or "",
+            "username": getattr(sender, "username", None),
+            "phone": store.get_peer_phone(peer),
+            "transcript": _history_to_text(msgs)[:6000],
+        }
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(
+                f"{API_URL}/internal/tg-progress",
+                json=payload,
+                headers={"X-Internal-Token": INTERNAL_API_TOKEN},
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as r:
+                await r.text()
+    except Exception as e:
+        print(f"[tg-progress error] {e}", flush=True)
+
+
+async def _report_tokens(resp) -> None:
+    """Ship this response's Anthropic usage to the API so /costs can see it.
+
+    The userbot has no Postgres — it runs on SQLite in its own container — so the
+    numbers go over the same internal endpoint as everything else. Never raises:
+    a candidate's reply must not depend on accounting being up.
+    """
+    try:
+        u = getattr(resp, "usage", None)
+        if u is None:
+            return
+        payload = {
+            "component": "tg_userbot",
+            "model": MODEL,
+            "tokens_input": int(getattr(u, "input_tokens", 0) or 0),
+            "tokens_output": int(getattr(u, "output_tokens", 0) or 0),
+        }
+        if not payload["tokens_input"] and not payload["tokens_output"]:
+            return
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(
+                f"{API_URL}/internal/token-usage",
+                json=payload,
+                headers={"X-Internal-Token": INTERNAL_API_TOKEN},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as r:
+                await r.text()
+    except Exception as e:
+        print(f"[token-usage error] {e}", flush=True)
+
+
+async def _should_engage(peer: str, phone: str | None) -> bool:
+    """Ask the API whether Eva should still talk to this peer. Once a candidate has
+    been handed to a recruiter (manager_review/interview/closed), the API says no and
+    Eva stays silent. Fail-open on any error — better to answer than to ghost a live
+    candidate over a transient glitch."""
+    try:
+        params = {"peer": peer}
+        if phone:
+            params["phone"] = phone
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(
+                f"{API_URL}/internal/tg-gate",
+                params=params,
+                headers={"X-Internal-Token": INTERNAL_API_TOKEN},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as r:
+                if r.status != 200:
+                    return True
+                data = await r.json()
+                return bool(data.get("engage", True))
+    except Exception as e:
+        print(f"[tg-gate error] {e}", flush=True)
+        return True
+
+
 @client.on(events.NewMessage(incoming=True))
 async def on_message(event):
     if not event.is_private:
@@ -466,21 +608,155 @@ async def on_message(event):
     if getattr(sender, "bot", False):
         return
     peer = str(sender.id)
+    if peer in TG_ADMIN_PEERS:  # a recruiter writing in, not a candidate
+        return
     store.log_message(peer, "user", event.raw_text)
+
+    # Debounce: if the candidate fires several messages in a row, wait for the
+    # burst to settle and reply ONCE. Each incoming message bumps the peer token;
+    # only the handler still holding the latest token proceeds. This kills the
+    # duplicate/double replies — previously every message spawned its own Claude
+    # reply that overlapped during the human-delay sleep.
+    token = _peer_seq.get(peer, 0) + 1
+    _peer_seq[peer] = token
+    await asyncio.sleep(TG_DEBOUNCE_SEC)
+    if _peer_seq.get(peer) != token:
+        return  # a newer message arrived — that handler answers the whole burst
+
+    # Once a recruiter owns this candidate (handed off), Eva stays silent. The
+    # incoming message is already stored above; we just don't reply.
+    if not await _should_engage(peer, store.get_peer_phone(peer)):
+        print(f"[tg-gate] silent — recruiter owns peer={peer}", flush=True)
+        return
+
     msgs = store.history(peer)
     try:
         resp = claude.messages.create(model=MODEL, max_tokens=300,
                                       system=SYSTEM_PROMPT, messages=msgs)
+        await _report_tokens(resp)
         reply = resp.content[0].text.strip()
     except Exception as e:
         print(f"[claude error] {e}", flush=True)
         return
-    await asyncio.sleep(random.uniform(4, 20))
+    # A newer message may have landed while Claude was thinking — drop this stale
+    # reply and let the newer handler answer the full context.
+    if _peer_seq.get(peer) != token:
+        return
     await human_typing(sender, reply)
     await event.respond(reply)
     store.log_message(peer, "assistant", reply)
+    await _push_progress(peer, sender, store.history(peer))
     await report_outcome_if_ready(peer, sender, store.history(peer))
     print(f"[{getattr(sender, 'first_name', peer)}] {event.raw_text[:50]!r} -> {reply[:50]!r}", flush=True)
+
+
+async def catch_up_unread(max_dialogs: int = 20, dry_run: bool = False,
+                          only: set[str] | None = None) -> dict:
+    """Answer private chats that arrived while Eva was offline.
+
+    on_message only fires on LIVE updates, so anything sent during a restart or an
+    outage sits unanswered forever — which is exactly how a misplaced decorator
+    silently swallowed three days of candidates. Runs at startup as a safety net and
+    can be re-run by hand via POST /catchup (add ?dry=1 to preview the replies
+    without sending them).
+    """
+    if not STATE.get("active", True):
+        return {"ok": False, "error": "paused"}
+    answered: list[dict] = []
+    skipped: list[dict] = []
+    try:
+        async for dialog in client.iter_dialogs(limit=100):
+            if len(answered) >= max_dialogs:
+                break
+            if not dialog.is_user or dialog.unread_count < 1:
+                continue
+            sender = dialog.entity
+            if getattr(sender, "bot", False):
+                continue
+            peer = str(sender.id)
+            who = getattr(sender, "first_name", None) or peer
+            if peer in TG_ADMIN_PEERS:  # colleague, not a candidate
+                skipped.append({"peer": peer, "who": who, "why": "admin"})
+                continue
+            if only is not None and peer not in only:
+                skipped.append({"peer": peer, "who": who, "why": "not_selected"})
+                continue
+
+            # Store what we missed, oldest first, skipping anything already logged —
+            # log_message is a plain INSERT, so the dedupe has to happen here.
+            known = {m["content"] for m in store.history(peer, limit=200)
+                     if m["role"] == "user"}
+            missed: list[str] = []
+            async for m in client.iter_messages(sender, limit=min(dialog.unread_count, 20)):
+                text = (m.raw_text or "").strip()
+                if m.out or not text or text in known:
+                    continue
+                missed.append(text)
+            missed.reverse()
+            if not missed:
+                skipped.append({"peer": peer, "who": who, "why": "nothing_new"})
+                continue
+            if not dry_run:
+                for text in missed:
+                    store.log_message(peer, "user", text)
+
+            if not await _should_engage(peer, store.get_peer_phone(peer)):
+                skipped.append({"peer": peer, "who": who, "why": "recruiter_owns"})
+                continue
+
+            msgs = store.history(peer)
+            if dry_run:  # history has no unsent tail yet — append it for the preview
+                msgs = msgs + [{"role": "user", "content": t} for t in missed]
+            try:
+                resp = claude.messages.create(model=MODEL, max_tokens=300,
+                                              system=SYSTEM_PROMPT, messages=msgs)
+                await _report_tokens(resp)
+                reply = resp.content[0].text.strip()
+            except Exception as e:
+                print(f"[catchup claude error] {e}", flush=True)
+                skipped.append({"peer": peer, "who": who, "why": f"claude: {e}"})
+                continue
+
+            if dry_run:
+                answered.append({"peer": peer, "who": who, "got": missed, "reply": reply})
+                continue
+            # One dead peer (deleted account, blocked, flood-wait) must not abort the
+            # whole sweep — and nothing counts as answered until it actually went out.
+            try:
+                await human_typing(sender, reply)
+                await client.send_message(sender, reply)
+            except Exception as e:
+                print(f"[catchup send failed] {who}: {e}", flush=True)
+                skipped.append({"peer": peer, "who": who, "why": f"send: {e}"})
+                continue
+            answered.append({"peer": peer, "who": who, "got": missed, "reply": reply})
+            store.log_message(peer, "assistant", reply)
+            try:
+                await client.send_read_acknowledge(dialog.entity)
+                await _push_progress(peer, sender, store.history(peer))
+                await report_outcome_if_ready(peer, sender, store.history(peer))
+            except Exception as e:  # bookkeeping only — the reply is already delivered
+                print(f"[catchup post-send] {who}: {e}", flush=True)
+            print(f"[catchup] {who} <- {reply[:60]!r}", flush=True)
+            await asyncio.sleep(3)  # space the burst out, the account is rate-limited
+    except Exception as e:
+        print(f"[catchup error] {e}", flush=True)
+        return {"ok": False, "error": str(e), "answered": answered, "skipped": skipped}
+    return {"ok": True, "dry_run": dry_run, "answered": answered, "skipped": skipped}
+
+
+async def h_outreach_stats(request):
+    return web.json_response(store.outreach_stats(int(request.query.get("days", 30))))
+
+
+async def h_catchup(request):
+    limit = int(request.query.get("limit", 20))
+    dry = request.query.get("dry") in ("1", "true", "yes")
+    raw = request.query.get("only", "")
+    only = {p.strip() for p in raw.split(",") if p.strip()} or None
+    return web.json_response(
+        await catch_up_unread(max_dialogs=limit, dry_run=dry, only=only)
+    )
 
 
 async def main():
@@ -491,6 +767,12 @@ async def main():
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", CTRL_PORT).start()
     print(f"control API on :{CTRL_PORT} | active={STATE.get('active')} limit={STATE.get('limit')}", flush=True)
+    # Safety net: whatever landed while we were down never fires on_message, so sweep
+    # the unread private chats once we're back up.
+    if TG_CATCHUP_ON_START:
+        res = await catch_up_unread()
+        print(f"[catchup@start] answered={len(res.get('answered') or [])} "
+              f"skipped={len(res.get('skipped') or [])}", flush=True)
     await client.run_until_disconnected()
 
 

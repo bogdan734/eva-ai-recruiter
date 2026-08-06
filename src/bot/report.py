@@ -60,6 +60,8 @@ class DayReport:
     funnel_rejected: int = 0
     funnel_unreachable: int = 0
     qualified_names: list[str] = field(default_factory=list)
+    robotaua_block: str = ""
+    balances_block: str = ""
 
 
 def _fmt_duration(seconds: int) -> str:
@@ -189,17 +191,75 @@ async def collect_for(target: date) -> DayReport:
     p = PRICING
     claude = (tokens_in / 1_000_000) * p.haiku_in_per_mtok + (
         tokens_out / 1_000_000) * p.haiku_out_per_mtok
+    # Vapi + Anthropic only: Vapi's per-minute price already covers STT/TTS, and
+    # ElevenLabs is gone since July 2026 — adding them inflated the report.
     rep.cost = {
         "claude": round(claude, 2),
-        "deepgram": round(minutes * p.deepgram_per_min, 2),
-        "elevenlabs": round(minutes * p.elevenlabs_per_min, 2),
         "vapi": round(minutes * p.vapi_per_min, 2),
-        "telephony": round(minutes * p.twilio_per_min, 2),
     }
     rep.cost["total"] = round(sum(rep.cost.values()), 2)
+    rep.robotaua_block = _robotaua_report_block()
+    rep.balances_block = await _balances_block()
 
     rep.tg_sent_today, rep.tg_limit, rep.tg_active = await _tg_stats()
     return rep
+
+
+def _robotaua_report_block() -> str:
+    """robota.ua queue/quota/chat numbers, from the pollers' own snapshot.
+
+    Same source as the bot's /status — reading it costs nothing, while calling
+    robota.ua from the report would spend a request against the limit that gets
+    this host Cloudflare-challenged.
+    """
+    try:
+        from src.integrations.robotaua_api import read_status
+        s = read_status()
+    except Exception:
+        return ""
+    if not s:
+        return ""
+    quota = s.get("quota_left")
+    lines = [
+        "",
+        "🔍 *robota.ua*",
+        f"├ Черга на відкриття контактів: {s.get('pending', '—')}",
+        f"├ Квота відкриттів: {quota if quota is not None else '—'}"
+        f" (відкрито {s.get('contacts_opened_total', 0)},"
+        f" сховали номер {s.get('phones_hidden_total', 0)})",
+        f"└ Чат: чекають обробки {s.get('chat_todo', 0)}"
+        f" (непрочитаних усього {s.get('chat_unread', 0)}),"
+        f" відповідей Єви сьогодні {s.get('chat_replies_today', 0)}",
+    ]
+    blocked = s.get("responses_blocked_until") or s.get("chat_blocked_until")
+    if blocked:
+        lines.append(f"  ⏳ Cloudflare пауза до {str(blocked)[11:16]} UTC")
+    return "\n".join(lines) + "\n"
+
+
+async def _balances_block() -> str:
+    """What is left of the client's top-ups, at the current burn rate."""
+    try:
+        import json
+        from pathlib import Path as _Path
+        from src.cost.summary import balance_forecast
+
+        state_path = _Path(os.getenv("STATE_PATH") or "/tmp/ai_recruiter_state.json")
+        balances = json.loads(state_path.read_text(encoding="utf-8")).get("balances") or {}
+        rows = await balance_forecast(balances)
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    out = ["", "🏦 *Залишки* (ваше поповнення мінус наш облік)"]
+    for i, r in enumerate(rows):
+        tail = f", на ~{r['days_left']} дн" if r.get("days_left") else ""
+        branch = "└" if i == len(rows) - 1 else "├"
+        out.append(
+            f"{branch} {r['service']}: ${r['left']} з ${r['topped_up']}"
+            f" (списано ${r['spent']}{tail})"
+        )
+    return "\n".join(out) + "\n"
 
 
 def format_report_md(rep: DayReport) -> str:
@@ -248,14 +308,13 @@ def format_report_md(rep: DayReport) -> str:
         f"\n"
         f"📥 *Нові кандидати: {total_intake}*\n"
         f"{intake_lines}\n"
+        f"{rep.robotaua_block}"
         f"\n"
         f"💰 *Витрати*\n"
-        f"├ Claude: ${c.get('claude', 0):.2f}\n"
-        f"├ Deepgram: ${c.get('deepgram', 0):.2f}\n"
-        f"├ ElevenLabs: ${c.get('elevenlabs', 0):.2f}\n"
-        f"├ Vapi: ${c.get('vapi', 0):.2f}\n"
-        f"├ Телефонія: ${c.get('telephony', 0):.2f}\n"
+        f"├ Vapi (дзвінки, {rep.total_in_line_sec // 60} хв): ${c.get('vapi', 0):.2f}\n"
+        f"├ Anthropic (токени дзвінків): ${c.get('claude', 0):.2f}\n"
         f"└ *Разом: ${total:.2f}*  (${per_qualified:.2f} за кваліфікованого)\n"
+        f"{rep.balances_block}"
         f"\n"
         f"🎯 *Воронка зараз*\n"
         f"├ Чекають дзвінка: {rep.funnel_to_call}\n"

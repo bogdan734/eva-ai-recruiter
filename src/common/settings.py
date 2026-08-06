@@ -74,11 +74,13 @@ class Settings(BaseSettings):
 
     match_score_threshold: float = 0.65
     region_whitelist: str = (
-        "Київська,Житомирська,Вінницька,Хмельницька,Тернопільська,Львівська,"
-        "Івано-Франківська,Закарпатська,Чернівецька,Рівненська,Волинська,Черкаська"
+        "Житомирська,Хмельницька,Тернопільська,Львівська,Івано-Франківська,"
+        "Закарпатська,Чернівецька,Рівненська,Волинська,Черкаська,Одеська,"
+        "Дніпропетровська"
     )
     region_blacklist: str = (
-        "м. Київ,Суми,Сумська,Запоріжжя,Запорізька,Херсон,Херсонська,Донецька"
+        "м. Київ,Київ,Київська,Вінниця,Вінницька,Суми,Сумська,"
+        "Запоріжжя,Запорізька,Херсон,Херсонська,Донецька"
     )
 
     # Candidate profile filter (sales manager / logistics role)
@@ -102,6 +104,13 @@ class Settings(BaseSettings):
     internal_api_token: str = "change-me-internal"
     # Vacancy link Eva sends at the start of a Telegram chat.
     vacancy_url: str = "https://www.work.ua/jobs/8249916/"
+    # KeyCRM «Вакансія» select value + «Номер вакансії» — auto-filled on every card.
+    keycrm_vacancy_label: str = "Менеджер з продажу"
+    vacancy_number: str = "8249916"
+    # Resume link in the card: "workua" = work.ua employer-cabinet applicant link
+    # (default); "selfhosted" = our own {APP_BASE_URL}/resume/{id} page rendered from
+    # the stored resume text (works without a work.ua login; used for robota.ua too).
+    resume_link_mode: str = "workua"
     company_name: str = "Kozyr Trans"
     company_pitch: str = (
         "Ми займаємося організацією внутрішніх та міжнародних вантажоперевезень."
@@ -117,7 +126,7 @@ class Settings(BaseSettings):
         "навчання, підтримка кураторів, тепла база, ліди надходять щодня"
     )
 
-    call_slots: str = "09:00,11:00,13:00,15:00,17:00,19:00"
+    call_slots: str = "10:00,14:00,18:30"
     call_max_attempts: int = 3
     call_max_concurrent: int = 3
     call_max_duration_sec: int = 420

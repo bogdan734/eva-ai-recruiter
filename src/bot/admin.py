@@ -4,6 +4,8 @@ Authorized users only (chat_id in TG_ADMIN_CHAT_IDS). Lets you:
 - /status — services + key counters
 - /pause / /resume — gate the call scheduler
 - /pause_workua / /resume_workua — gate the work.ua poller
+- /pause_robotaua / /resume_robotaua — gate the robota.ua poller
+- /costs, /set_balance — metered spend and what is left of a top-up
 - /queue — funnel snapshot
 - /test_call <phone_e164> — trigger one outbound Vapi call
 - /params — show key tunables from .env
@@ -15,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +72,11 @@ def workua_paused() -> bool:
     return bool(_state.get("workua_paused"))
 
 
+def robotaua_paused() -> bool:
+    _load_state()
+    return bool(_state.get("robotaua_paused"))
+
+
 def match_score_override() -> float | None:
     v = _state.get("match_score_threshold")
     return float(v) if v is not None else None
@@ -106,12 +114,16 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             call_count = (await session.execute(select(func.count(Call.id)))).scalar()
         calls_state = "⏸ ПАУЗА" if calls_paused() else "🟢 АКТИВНО"
         wua_state = "⏸ ПАУЗА" if workua_paused() else "🟢 АКТИВНО"
+        rua_state = "⏸ ПАУЗА" if robotaua_paused() else "🟢 АКТИВНО"
+        rua_pending = _robotaua_pending_count()
+        rua_line = _robotaua_block(rua_state)
         threshold = match_score_override() or os.getenv("MATCH_SCORE_THRESHOLD", "0.65")
         funnel_lines = "\n".join(f"├ {k}: {v}" for k, v in sorted(funnel.items())) or "├ _(порожньо)_"
         text = (
             "*Статус AI Recruiter*\n\n"
             f"📞 Дзвонилка: {calls_state}\n"
             f"🔍 work.ua пуллер: {wua_state}\n"
+            f"{rua_line}\n"
             f"🎯 Match threshold: `{threshold}`\n\n"
             f"*Воронка зараз:*\n{funnel_lines}\n\n"
             f"📊 Всього дзвінків в БД: {call_count}\n"
@@ -149,6 +161,174 @@ async def cmd_resume_workua(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
         _state["workua_paused"] = False
         _save_state()
         await u.message.reply_text("🟢 work.ua пуллер активний.")
+    await _guarded(update, ctx, _do)
+
+
+def _robotaua_pending_count() -> int:
+    """Applies whose phone robota.ua keeps behind "open contacts" — they sit in
+    the poller's cursor file until someone opens the contact in the cabinet."""
+    try:
+        from src.integrations.robotaua_sync import load_cursor
+        return len(load_cursor().get("pending") or {})
+    except Exception:
+        return 0
+
+
+async def cmd_pause_robotaua(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _do(u, c):
+        _state["robotaua_paused"] = True
+        _save_state()
+        await u.message.reply_text("⏸ robota.ua пуллер зупинено.")
+    await _guarded(update, ctx, _do)
+
+
+async def cmd_resume_robotaua(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _do(u, c):
+        _state["robotaua_paused"] = False
+        _save_state()
+        await u.message.reply_text("🟢 robota.ua пуллер активний.")
+    await _guarded(update, ctx, _do)
+
+
+def _robotaua_block(state_label: str) -> str:
+    """robota.ua numbers for /status, read from the poller's snapshot file.
+
+    Never calls robota.ua: their Cloudflare rate-limits us, and a /status press
+    must not spend one of the few requests a poll gets.
+    """
+    try:
+        from src.integrations.robotaua_api import read_status
+        s = read_status()
+    except Exception:
+        s = {}
+    if not s:
+        return f"🔍 robota.ua: {state_label}"
+
+    def when(key: str) -> str:
+        raw = s.get(key)
+        if not raw:
+            return "—"
+        try:
+            dt = datetime.fromisoformat(str(raw)[:19])
+        except ValueError:
+            return "—"
+        mins = int((datetime.utcnow() - dt).total_seconds() // 60)
+        return f"{mins} хв тому" if mins < 90 else dt.strftime("%d.%m %H:%M")
+
+    lines = [f"🔍 robota.ua: {state_label}"]
+    lines.append(
+        f"├ відгуки: черга контактів {s.get('pending', '—')}, "
+        f"останній збір {when('responses_last_ok')}"
+    )
+    quota = s.get("quota_left")
+    lines.append(
+        f"├ квота відкриттів: {quota if quota is not None else '—'}"
+        f" (відкрито {s.get('contacts_opened_total', 0)},"
+        f" сховали номер {s.get('phones_hidden_total', 0)})"
+    )
+    lines.append(
+        f"├ чат: чекають обробки {s.get('chat_todo', 0)}"
+        f" (непрочитаних усього {s.get('chat_unread', 0)}),"
+        f" відповіді сьогодні {s.get('chat_replies_today', 0)},"
+        f" останній збір {when('chat_last_ok')}"
+    )
+    blocked = s.get("responses_blocked_until") or s.get("chat_blocked_until")
+    if blocked:
+        lines.append(f"└ ⏳ Cloudflare пауза до {str(blocked)[11:16]} UTC")
+    return "\n".join(lines)
+
+
+async def cmd_costs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _do(u, c):
+        from datetime import timedelta
+        from src.cost.summary import balance_forecast, spend_since
+
+        today = await spend_since(datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0))
+        week = await spend_since(datetime.utcnow() - timedelta(days=7))
+        lines = [
+            "*Гроші*",
+            "",
+            f"*Сьогодні:* {today.calls} дзвінків, {today.minutes} хв → *${today.total}*",
+            "  " + ", ".join(f"{k} ${v}" for k, v in today.per_service.items()),
+            f"*7 днів:* {week.calls} дзвінків, {week.minutes} хв → *${week.total}*",
+            "  " + ", ".join(f"{k} ${v}" for k, v in week.per_service.items()),
+        ]
+
+        forecast = await balance_forecast(_state.get("balances") or {})
+        if forecast:
+            lines += ["", "*Залишки* (від вашого поповнення мінус наші витрати):"]
+            for f in forecast:
+                tail = f"на ~{f['days_left']} дн" if f.get("days_left") else "витрат нема"
+                lines.append(
+                    f"├ {f['service']}: було ${f['topped_up']} ({f['at']}),"
+                    f" списано ${f['spent']} → *${f['left']}*, {tail}"
+                )
+        else:
+            lines += [
+                "",
+                "_Балансів не задано._ Після поповнення надішліть:",
+                "`/set_balance vapi 20` або `/set_balance anthropic 25`",
+            ]
+        # Where the Anthropic tokens actually went this week. Until 04.08 only the
+        # post-call summaries were counted, so this line is the honest picture.
+        from src.cost.usage import breakdown_since
+
+        parts = await breakdown_since(datetime.utcnow() - timedelta(days=7))
+        if parts:
+            named = {
+                "name_origin": "перевірка імен на інтейку",
+                "scorer": "оцінка відповідності",
+                "tg_userbot": "переписка в Telegram",
+            }
+            lines += ["", "*Токени поза дзвінками* (7 днів):"]
+            for p in parts:
+                total_tok = p["tokens_in"] + p["tokens_out"]
+                lines.append(
+                    f"├ {named.get(p['component'], p['component'])}: {total_tok:,} ток."
+                    .replace(",", " ")
+                )
+            lines.append(
+                f"└ разом з дзвінками: {week.tokens_in + week.off_call_tokens_in:,} вх / "
+                f"{week.tokens_out + week.off_call_tokens_out:,} вих".replace(",", " ")
+            )
+
+        lines += [
+            "",
+            "_Оцінка за тарифами `pricing.py`, а не рахунок вендора._",
+            "_Anthropic тепер рахує і дзвінки, і роботу Єви між ними "
+            "(перевірка імен, оцінка, Telegram). У чаті robota.ua відповіді "
+            "шаблонні — токенів там нема._",
+            "_Токени самої розмови всередині Vapi нам не віддаються — на цю "
+            "частину рахунку ми не бачимо._",
+            "_Черга й квота robota.ua — у `/status`._",
+        ]
+        await u.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    await _guarded(update, ctx, _do)
+
+
+async def cmd_set_balance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _do(u, c):
+        args = (c.args or [])
+        if len(args) < 2:
+            await u.message.reply_text(
+                "Формат: `/set_balance <vapi|anthropic|deepgram> <сума>`\n"
+                "Напр. `/set_balance vapi 20` — після поповнення на 20 доларів.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        service = args[0].strip().lower()
+        try:
+            usd = float(args[1].replace(",", "."))
+        except ValueError:
+            await u.message.reply_text("Сума має бути числом, напр. `20` або `17.98`.")
+            return
+        balances = dict(_state.get("balances") or {})
+        balances[service] = {"usd": usd, "at": datetime.utcnow().isoformat(timespec="seconds")}
+        _state["balances"] = balances
+        _save_state()
+        await u.message.reply_text(
+            f"✅ {service}: ${usd:.2f} зафіксовано. Далі рахую списання від цього моменту — `/costs`."
+        )
     await _guarded(update, ctx, _do)
 
 
@@ -336,7 +516,11 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "`/pause` — зупинити дзвонилку\n"
         "`/resume` — продовжити\n"
         "`/pause_workua` — зупинити пуллер work.ua\n"
-        "`/resume_workua` — продовжити\n\n"
+        "`/resume_workua` — продовжити\n"
+        "`/costs` — витрати й залишки на балансах\n"
+        "`/set_balance <сервіс> <сума>` — зафіксувати баланс після поповнення\n"
+        "`/pause_robotaua` — зупинити пуллер robota.ua\n"
+        "`/resume_robotaua` — продовжити\n\n"
         "🎯 Налаштування:\n"
         "`/set_threshold 0.65` — поріг match-score\n\n"
         "📞 Тест:\n"
@@ -352,6 +536,10 @@ def register_admin_handlers(app) -> None:
     app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("pause_workua", cmd_pause_workua))
     app.add_handler(CommandHandler("resume_workua", cmd_resume_workua))
+    app.add_handler(CommandHandler("pause_robotaua", cmd_pause_robotaua))
+    app.add_handler(CommandHandler("resume_robotaua", cmd_resume_robotaua))
+    app.add_handler(CommandHandler("costs", cmd_costs))
+    app.add_handler(CommandHandler("set_balance", cmd_set_balance))
     app.add_handler(CommandHandler("queue", cmd_queue))
     app.add_handler(CommandHandler("test_call", cmd_test_call))
     app.add_handler(CommandHandler("params", cmd_params))

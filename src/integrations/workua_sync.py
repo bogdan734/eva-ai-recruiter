@@ -21,6 +21,7 @@ from typing import Any
 import structlog
 
 from src.api.inbound_router import IngestPayload, InboundRouter
+from src.common import vacancies
 from src.integrations.workua_api import (
     WorkUaApiError,
     WorkUaAuthError,
@@ -29,7 +30,12 @@ from src.integrations.workua_api import (
     parse_resume,
     parse_response,
 )
+from src.match.profile_filter import FilterResult
 from src.match.profile_filter import evaluate as profile_evaluate
+
+# Stand-in verdict for vacancies whose candidates are not screened by the sales
+# portrait — the recruiter reads the card instead.
+_ACCEPTED = FilterResult(accepted=True, reason="intake_only_vacancy")
 from src.match.scorer import MatchScorer
 
 log = structlog.get_logger()
@@ -63,12 +69,16 @@ def _save_cursor(state: dict[str, Any]) -> None:
 
 
 def _allowed_vacancy_ids() -> set[int]:
-    """Parse WORKUA_ALLOWED_VACANCY_IDS csv env var. Empty = allow all."""
+    """Which work.ua job ids we pull Відгуки for.
+
+    The vacancy registry is the base — every job id we recruit for, including
+    the intake-only ones. WORKUA_ALLOWED_VACANCY_IDS stays supported and is
+    added on top, so an id can still be switched on from the environment
+    without a code change.
+    """
     import os
+    out: set[int] = set(vacancies.workua_ids())
     raw = (os.getenv("WORKUA_ALLOWED_VACANCY_IDS") or "").strip()
-    if not raw:
-        return set()
-    out: set[int] = set()
     for tok in raw.split(","):
         tok = tok.strip()
         if not tok:
@@ -112,7 +122,12 @@ async def poll_responses(
                     r = await client.list_responses_for_vacancy(
                         vid, limit=page_size, last_id=last_id
                     )
-                    merged.extend(r.get("items") or [])
+                    for item in (r.get("items") or []):
+                        # The per-vacancy endpoint may omit job_id (it is implied
+                        # by the URL). Stamp it so routing downstream knows which
+                        # vacancy — and therefore which funnel — this belongs to.
+                        item.setdefault("job_id", vid)
+                        merged.append(item)
                 except (WorkUaApiError, WorkUaAuthError) as e:
                     log.warning("workua.vacancy_fetch_failed", vid=vid, error=str(e))
                     stats.errors += 1
@@ -167,6 +182,7 @@ async def poll_responses(
             stats.rejected += 1
             continue
 
+        route = vacancies.for_workua(resp.job_id) or vacancies.DEFAULT
         full_name = resp.fio or "Кандидат work.ua"
         # Quick profile filter — region/age via from_type isn't available here yet,
         # but birth_date is.
@@ -177,7 +193,9 @@ async def poll_responses(
             except ValueError:
                 birth_year = None
 
-        profile = profile_evaluate(
+        # The portrait below is the sales one. An intake-only vacancy has its own
+        # requirements and a human reads the card, so it goes straight through.
+        profile = _ACCEPTED if not route.screen_enabled else profile_evaluate(
             full_name=full_name,
             region=None,  # not in response payload; AI will ask on call
             desired_position=resp.text or resp.cover,
@@ -190,6 +208,18 @@ async def poll_responses(
             log.info("workua.profile_rejected", id=resp.id, reason=profile.reason)
             continue
 
+        # Employer-cabinet link to this applicant's resume (FREE — no paid contact
+        # opening). Format confirmed 2026-07-22: /employer/my/applicants/{candidate_id}/.
+        # Never emit a dangling "?jobId=" — a response that came back without a
+        # job_id used to produce exactly that, and the link then opens nothing.
+        # The applicant page works on its own; the query only preselects the job.
+        applicant_url = None
+        if resp.candidate_id:
+            applicant_url = (
+                f"https://www.work.ua/employer/my/applicants/{resp.candidate_id}/"
+            )
+            if resp.job_id:
+                applicant_url += f"?jobId={resp.job_id}"
         result = await router.ingest(
             IngestPayload(
                 full_name=full_name,
@@ -197,8 +227,12 @@ async def poll_responses(
                 email=resp.email,
                 region_raw=None,
                 desired_position=None,
+                work_ua_url=applicant_url,
+                workua_response_id=str(resp.id),
+                resume_text=((resp.text or "") + (("\n\n" + resp.cover) if resp.cover else "")).strip() or None,
                 source=f"workua_response_{resp.from_type}",
-                vacancy_id=1,  # local FK; work.ua job_id lives in raw payload
+                vacancy_id=vacancies.LOCAL_FK,  # local FK; work.ua job_id lives in raw payload
+                vacancy_key=route.key,
             )
         )
         if not result.accepted:

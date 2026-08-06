@@ -9,17 +9,22 @@ import structlog
 from fastapi import FastAPI, Header, HTTPException, Request
 
 from src.common.settings import get_settings
+from src.cost import usage
 
 from .schemas import (
     HealthResponse,
     KeyCRMWebhookPayload,
     VapiWebhookPayload,
     TgOutcomePayload,
+    TgProgressPayload,
+    TokenUsagePayload,
     WorkUaInboundPayload,
 )
 from .services import (
+    handle_assistant_request,
     handle_keycrm_event,
     handle_tg_outcome,
+    handle_tg_progress,
     handle_vapi_event,
     handle_workua_inbound,
 )
@@ -81,6 +86,10 @@ async def vapi_webhook(
             raise HTTPException(401, "bad signature")
     payload = VapiWebhookPayload.model_validate_json(body)
     log.info("vapi.event", type=payload.type, call_id=payload.call_id)
+    # Inbound: Vapi asks who should answer BEFORE connecting — reply synchronously
+    # with the assistant (Eva by default, a brief handoff line for handed-off callers).
+    if payload.type == "assistant-request":
+        return await handle_assistant_request(payload)
     await handle_vapi_event(payload)
     return {"ok": True}
 
@@ -121,6 +130,38 @@ async def get_recording(vapi_call_id: str):
     return RedirectResponse(url)
 
 
+@app.get("/resume/{candidate_id}")
+async def get_resume(candidate_id: int):
+    """Self-hosted resume page (variant 2). Renders the resume text we stored at
+    ingest — a stable link that works without a work.ua login, and uniform across
+    boards (work.ua, robota.ua). Selected via RESUME_LINK_MODE=selfhosted."""
+    from html import escape
+    from fastapi.responses import HTMLResponse
+    from src.common.db import session_scope
+    from src.common.models import Candidate
+
+    async with session_scope() as session:
+        cand = await session.get(Candidate, candidate_id)
+    if not cand or not cand.resume_text:
+        raise HTTPException(status_code=404, detail="resume not available")
+    name = escape(cand.full_name or "Кандидат")
+    body = escape(cand.resume_text).replace("\n", "<br>")
+    extra = " · ".join(filter(None, [escape(cand.region or ""), escape(cand.phone_e164 or "")]))
+    page = (
+        "<!doctype html><html lang=\"uk\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        f"<title>Резюме — {name}</title><style>"
+        "body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:760px;"
+        "margin:24px auto;padding:0 16px;line-height:1.55;color:#1a1a1a}"
+        "h1{font-size:20px;margin:0 0 4px}.meta{color:#777;font-size:13px;margin-bottom:16px}"
+        ".card{background:#fafafa;border:1px solid #ececec;border-radius:10px;padding:20px;font-size:14px}"
+        "</style></head><body>"
+        f"<h1>{name}</h1><div class=\"meta\">{extra}</div><div class=\"card\">{body}</div>"
+        "</body></html>"
+    )
+    return HTMLResponse(page)
+
+
 @app.post("/internal/tg-outcome")
 async def tg_outcome(
     payload: TgOutcomePayload,
@@ -140,4 +181,86 @@ async def tg_outcome(
         age=payload.age,
         summary=payload.summary,
         transcript=payload.transcript,
+        reason=payload.reason,
     )
+
+
+# Statuses where a recruiter now owns the candidate — Eva must stop engaging.
+_HANDOFF_STATUSES = {"manager_review", "interview_scheduled", "closed"}
+
+
+@app.get("/internal/tg-gate")
+async def tg_gate(
+    peer: str,
+    phone: str | None = None,
+    x_internal_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Should Eva keep talking to this Telegram peer? Returns engage=False once the
+    candidate has been handed to a recruiter (manager_review / interview / closed),
+    so Eva goes silent instead of re-opening a dialog the recruiter now owns. The
+    candidate is resolved exactly like tg-outcome: real phone if known, else the
+    stable tg<peer> surrogate."""
+    s = get_settings()
+    if x_internal_token != s.internal_api_token:
+        raise HTTPException(status_code=401, detail="bad internal token")
+    from sqlalchemy import select
+    from src.common.db import session_scope
+    from src.common.models import Candidate
+    from src.common.phone import normalize_phone
+
+    keys = [f"tg{peer}"[:20]]
+    if phone:
+        try:
+            norm = normalize_phone(phone)
+            if norm:
+                keys.insert(0, norm)
+        except Exception:
+            pass
+    async with session_scope() as session:
+        cand = (await session.execute(
+            select(Candidate).where(Candidate.phone_e164.in_(keys))
+        )).scalars().first()
+    status = cand.status if cand else None
+    return {"engage": status not in _HANDOFF_STATUSES, "status": status, "found": cand is not None}
+
+
+@app.post("/internal/tg-progress")
+async def tg_progress(
+    payload: TgProgressPayload,
+    x_internal_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Live Telegram transcript update — keeps a candidate's CRM card current before a
+    verdict (no-op if they have no card yet)."""
+    s = get_settings()
+    if x_internal_token != s.internal_api_token:
+        raise HTTPException(status_code=401, detail="bad internal token")
+    return await handle_tg_progress(
+        peer_id=payload.peer_id,
+        name=payload.name,
+        username=payload.username,
+        phone=payload.phone,
+        transcript=payload.transcript,
+    )
+
+
+@app.post("/internal/token-usage")
+async def token_usage(
+    payload: TokenUsagePayload,
+    x_internal_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Anthropic usage from a service without its own Postgres — the userbot.
+
+    Fire-and-forget by design: the caller must not fail a candidate reply because
+    accounting is down, so this always answers 200 once the token checks out.
+    """
+    s = get_settings()
+    if x_internal_token != s.internal_api_token:
+        raise HTTPException(status_code=401, detail="bad internal token")
+    await usage.record(
+        payload.component or usage.TG_USERBOT,
+        None,
+        model=payload.model,
+        tokens_in=payload.tokens_input,
+        tokens_out=payload.tokens_output,
+    )
+    return {"ok": True}

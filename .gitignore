@@ -10,3 +10,5 @@ _trash_*/
 debug-*/
 *.log
 tg_userbot/data/
+
+.cache/

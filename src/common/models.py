@@ -67,11 +67,17 @@ class Candidate(Base):
     experience_years: Mapped[int | None] = mapped_column(Integer, nullable=True)
     languages: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     work_ua_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    resume_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str] = mapped_column(String(32), default="manual")
     match_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[CandidateStatus] = mapped_column(String(32), default=CandidateStatus.NEW_RESUME.value)
     vacancy_id: Mapped[int | None] = mapped_column(ForeignKey("vacancies.id"), nullable=True)
     call_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    # Candidate asked to be called back — the dispatcher picks them up once this
+    # moment passes, instead of the promise quietly evaporating.
+    callback_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -90,6 +96,8 @@ class Call(Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_sec: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[CallStatus] = mapped_column(String(32), default=CallStatus.FAILED.value)
+    # Vapi endedReason — why the call really ended (busy / unavailable / voicemail).
+    ended_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     audio_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     transcript: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -102,6 +110,27 @@ class Call(Base):
     tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
 
     candidate: Mapped[Candidate] = relationship(back_populates="calls")
+
+
+class TokenUsage(Base):
+    """Anthropic tokens spent OUTSIDE a call.
+
+    `Call.tokens_input/output` only ever holds the post-call summarizer's usage,
+    so everything else Єва thinks with — the name-origin check on every intake,
+    match scoring, and the Telegram userbot's three prompts — used to be
+    invisible to `/costs`. Each row is one API response's usage.
+    """
+    __tablename__ = "token_usage"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # YYYY-MM-DD (UTC) — matches DailyCost.date so the two roll up together.
+    date: Mapped[str] = mapped_column(String(10), index=True)
+    component: Mapped[str] = mapped_column(String(32), index=True)
+    model: Mapped[str] = mapped_column(String(64), default="")
+    tokens_input: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_output: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
 
 
 class DailyCost(Base):

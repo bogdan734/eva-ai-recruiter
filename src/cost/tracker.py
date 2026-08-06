@@ -10,6 +10,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from src.common.db import session_scope
 from src.common.models import Call, DailyCost
 
+from . import usage
 from .pricing import PRICING
 
 
@@ -26,6 +27,11 @@ async def rollup_for_date(target: date) -> dict[str, Any]:
         row = (await session.execute(q)).one()
         duration_sec, tok_in, tok_out, total_usd, count = row
         duration_min = (duration_sec or 0) / 60.0
+        # Tokens spent between calls (intake name check, scoring, TG userbot) —
+        # they are on the same Anthropic bill, so they roll up with the rest.
+        off_in, off_out = await usage.tokens_for_date(iso)
+        tok_in = (tok_in or 0) + off_in
+        tok_out = (tok_out or 0) + off_out
         agg = {
             "date": iso,
             "calls": count or 0,

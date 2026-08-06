@@ -26,6 +26,10 @@ dependencies = [
   "tenacity>=9.0",
   "rich>=13.9",
   "boto3>=1.35",
+  # Reads phone numbers out of CVs that robota.ua serves as an attached file
+  # (resumeType=AttachedFile, resumeId=0 — there is no resume record to fetch).
+  # Pure Python, no system libraries. .docx is unzipped without a dependency.
+  "pypdf>=5.1",
 ]
 
 [project.optional-dependencies]

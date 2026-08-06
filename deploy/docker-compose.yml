@@ -31,6 +31,7 @@ services:
       - STATE_PATH=/state/ai_recruiter_state.json
     volumes:
       - ../state:/state
+    networks: [default, v6net]
 
   scheduler:
     build:
@@ -46,6 +47,7 @@ services:
       - STATE_PATH=/state/ai_recruiter_state.json
     volumes:
       - ../state:/state
+    networks: [default, v6net]
 
 
   scraper:
@@ -98,6 +100,17 @@ services:
       - ../tg_userbot/data:/data
     expose:
       - "8090"
+
+networks:
+  default:
+  # robota.ua's Cloudflare rejects this host's IPv4 and accepts its IPv6, so the
+  # services that talk to robota.ua need a v6 stack. Docker NATs this ULA subnet
+  # out through the host's global address.
+  v6net:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: fd00:a1:c0de::/64
 
 volumes:
   pgdata:
