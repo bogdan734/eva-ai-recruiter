@@ -1,10 +1,10 @@
-"""KeyCRM Open API v1 client — Kozyr Trans setup.
+"""KeyCRM Open API v1 client — Example Logistics setup.
 
 Live structure discovered 2026-06-23:
 - Funnel (pipeline) id=1 "1 Етап Менеджер з продажу"
 - Statuses: 1=Новий, 2=Відібрано, 4=Дійшов на 1 тур,
             32=Не актуально, 33=Не підходить нам, 34=Не ЦА
-- Default manager: id=3 Svitlana Kozyrtrans
+- Default manager: id=3 Svitlana ExampleLogistics
 - Existing custom fields: LD_1001 Вакансія, LD_1002 Номер вакансії,
   LD_1003 Опис вакансії, LD_1004 Посилання на вакансію
 - DELETE on /pipelines/cards/<id> not allowed → move to status 32 instead
@@ -19,7 +19,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
 from src.common.settings import get_settings
 
-# Live values from current Kozyr Trans KeyCRM
+# Live values from current Example Logistics KeyCRM
 FUNNEL_ID = 1
 
 STATUS_NEW = 1                  # default for newly created — "Новий"
@@ -28,7 +28,7 @@ STATUS_INTERVIEW_PASSED = 4     # interview happened — "Дійшов на 1 т
 STATUS_NOT_INTERESTED = 32      # final — "Не актуально"
 STATUS_WE_REJECTED = 33         # final — "Не підходить нам"
 STATUS_BLACKLIST = 34           # final — "Не ЦА"
-DEFAULT_MANAGER_ID = 3          # Svitlana Kozyrtrans
+DEFAULT_MANAGER_ID = 3          # Svitlana ExampleLogistics
 
 # Custom-field UUIDs (created in KeyCRM UI)
 # Original 4 (manual entry by HR)

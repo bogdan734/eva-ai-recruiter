@@ -11,7 +11,7 @@ def test_parse_response_minimal():
         "from_type": "send",
         "birth_date": "1990-05-15",
         "email": "ivan@example.com",
-        "phone": "+380671234567",
+        "phone": "+380XXXXXXXXX",
         "type": "resume",
         "with_file": "0",
         "text": "досвід менеджера з продажу 3 роки",
@@ -22,7 +22,7 @@ def test_parse_response_minimal():
     assert r.id == 1234
     assert r.job_id == 55
     assert r.fio == "Іван Петренко"
-    assert r.phone == "+380671234567"
+    assert r.phone == "+380XXXXXXXXX"
     assert r.from_type == "send"
     assert r.with_file is False
     assert r.prefer_channels == ["phone"]
@@ -53,7 +53,7 @@ def test_parse_resume_with_contacts():
             "salary": "30000",
             "sex_rid": "86",
             "contacts": {
-                "phone": "+380501234567",
+                "phone": "+380XXXXXXXXX",
                 "email": "olena@example.com",
                 "exprns": [
                     {
@@ -69,7 +69,7 @@ def test_parse_resume_with_contacts():
     r = parse_resume(raw)
     assert r.resume_id == 999
     assert r.first_name == "Олена"
-    assert r.phone == "+380501234567"
+    assert r.phone == "+380XXXXXXXXX"
     assert r.salary == 30000
     assert len(r.experiences) == 1
     assert r.experiences[0]["position"] == "Sales manager"

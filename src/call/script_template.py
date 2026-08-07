@@ -1,8 +1,8 @@
-"""System prompt for Vapi assistant — Kozyr Trans (Єва).
+"""System prompt for Vapi assistant — Example Logistics (Єва).
 
-Mirrors docs/call_script_v1_kozyr_trans.md verbatim where possible. Placeholders in
+Mirrors docs/call_script_v1_example_logistics.md verbatim where possible. Placeholders in
 ${...} are filled per-call from candidate + vacancy data. Defaults match the
-Kozyr Trans context.
+Example Logistics context.
 """
 from __future__ import annotations
 

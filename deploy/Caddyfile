@@ -1,8 +1,8 @@
 {
-    email admin@kozyrtrans-ai.com
+    email admin@example-logistics-ai.com
 }
 
-api.kozyrtrans-ai.com {
+api.example-logistics-ai.com {
     reverse_proxy api:8000
     encode gzip
     log {
@@ -11,7 +11,7 @@ api.kozyrtrans-ai.com {
     }
 }
 
-webhooks.kozyrtrans-ai.com {
+webhooks.example-logistics-ai.com {
     reverse_proxy api:8000
     encode gzip
     log {
@@ -20,7 +20,7 @@ webhooks.kozyrtrans-ai.com {
     }
 }
 
-bot.kozyrtrans-ai.com {
+bot.example-logistics-ai.com {
     reverse_proxy bot:8001
     encode gzip
 }

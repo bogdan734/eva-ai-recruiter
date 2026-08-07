@@ -1,12 +1,12 @@
-"""Configure Cloudflare DNS for kozyrtrans-ai.com — call after Hetzner VPS up.
+"""Configure Cloudflare DNS for example-logistics-ai.com — call after Hetzner VPS up.
 
 Usage:
     python3 scripts/cloudflare_dns_setup.py <VPS_IP>
 
 Creates A records:
-    api.kozyrtrans-ai.com       → VPS_IP  (proxied)
-    webhooks.kozyrtrans-ai.com  → VPS_IP  (proxied)
-    bot.kozyrtrans-ai.com       → VPS_IP  (proxied)
+    api.example-logistics-ai.com       → VPS_IP  (proxied)
+    webhooks.example-logistics-ai.com  → VPS_IP  (proxied)
+    bot.example-logistics-ai.com       → VPS_IP  (proxied)
 
 Idempotent — re-running updates existing records instead of duplicating.
 """
@@ -38,7 +38,7 @@ def load_env() -> dict[str, str]:
 ENV = load_env()
 TOKEN = ENV["CLOUDFLARE_API_TOKEN"]
 ZONE_ID = ENV["CLOUDFLARE_ZONE_ID"]
-DOMAIN = ENV.get("CLOUDFLARE_DOMAIN", "kozyrtrans-ai.com")
+DOMAIN = ENV.get("CLOUDFLARE_DOMAIN", "example-logistics-ai.com")
 CTX = ssl.create_default_context(cafile=certifi.where())
 
 SUBDOMAINS = ["api", "webhooks", "bot"]

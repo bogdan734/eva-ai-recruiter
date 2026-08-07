@@ -53,7 +53,7 @@ async def main() -> None:
     phone_patch = {
         "assistantId": assistant_id,
         "server": {
-            "url": "https://api.kozyrtrans-ai.com/webhooks/vapi/events",
+            "url": "https://api.example-logistics-ai.com/webhooks/vapi/events",
             "secret": webhook_secret,
         },
     }

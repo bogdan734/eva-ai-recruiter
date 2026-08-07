@@ -1,6 +1,6 @@
-"""Call FSM — Kozyr Trans flow (Єва-script v1).
+"""Call FSM — Example Logistics flow (Єва-script v1).
 
-11 explicit steps matching docs/call_script_v1_kozyr_trans.md. Each step has a
+11 explicit steps matching docs/call_script_v1_example_logistics.md. Each step has a
 single conversational purpose; the orchestrator advances on tool-call.
 """
 from __future__ import annotations

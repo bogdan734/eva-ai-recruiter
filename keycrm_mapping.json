@@ -5,8 +5,8 @@
   },
   "manager_default": {
     "id": 3,
-    "name": "Svitlana Kozyrtrans",
-    "email": "kozyrtranshrmanager@gmail.com"
+    "name": "Svitlana ExampleLogistics",
+    "email": "examplelogisticshrmanager@gmail.com"
   },
   "statuses": {
     "1": {"name": "Новий", "color": "#69DB7C", "is_final": false, "purpose": "default for newly-created"},
