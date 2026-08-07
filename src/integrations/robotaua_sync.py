@@ -650,12 +650,33 @@ async def poll_responses(
     ttl_days = _env_int("ROBOTAUA_PENDING_TTL_DAYS", 30)
     stale_before = datetime.utcnow() - timedelta(days=ttl_days)
     probes_left = PENDING_PROBE_PER_RUN
-    # Applies whose contacts we opened ourselves go first — their phone is
-    # waiting right now, while the rest are just hoping a recruiter gets to them.
+    # Order matters more here than it looks. Only PENDING_PROBE_PER_RUN entries
+    # get a request per poll, so a sort that depends solely on standing facts
+    # picks the same few every single run and the rest of the backlog is never
+    # looked at. That is exactly what happened 03–07.08: 103 polls, ~96 probes,
+    # all of them spent re-checking the same two applies whose phones stayed
+    # hidden, `recovered=0` every time while the queue grew 101 → 110.
+    # `last_probe` rotates it: an entry just probed sorts to the back, so the
+    # pointer walks the backlog instead of stalling on its head. The request
+    # budget is untouched — still two probes per poll, and Cloudflare sees no
+    # more traffic than before; they are simply two *different* applies.
+    #
+    # `last_probe` has to be the FIRST key, ahead of the paid-opening priority.
+    # The other way round the same starvation just moves up a level: applies
+    # whose contacts we opened would cycle among themselves forever and the
+    # ~93 others would still never be looked at. Never-probed entries carry no
+    # stamp, so they sort ahead of everyone — the whole backlog gets one probe
+    # before anyone gets a second, and the paid openings only win among equals.
     opened_here = set(cursor.get("contacts_opened") or [])
     for apply_id in sorted(
         pending,
-        key=lambda k: (k not in opened_here, pending[k].get("first_seen") or ""),
+        key=lambda k: (
+            pending[k].get("last_probe") or "",
+            # Ours first among the never-probed: we spent quota on that phone,
+            # the rest are just hoping a recruiter opens the contact.
+            k not in opened_here,
+            pending[k].get("first_seen") or "",
+        ),
     ):
         if blocked:
             break
@@ -676,6 +697,10 @@ async def poll_responses(
             if not resume_id:
                 continue
             probes_left -= 1
+            # Stamped before the request, not after: a probe that ends in a block
+            # or an error has still cost us the slot, and leaving the stamp off
+            # would hand this same entry the next poll's budget as well.
+            entry["last_probe"] = datetime.utcnow().isoformat(timespec="seconds")
             try:
                 resume = await client.get_resume(resume_id)
             except RobotaUaBlockedError as e:
@@ -687,6 +712,16 @@ async def poll_responses(
                 continue
             await asyncio.sleep(REQUEST_PAUSE_SEC)
             if not (resume.get("phone") or "").strip():
+                # A bare `continue` here is why a stalled queue stayed invisible
+                # for four days: the only counter that moved was `pending`, and
+                # it moves for other reasons too. One line per spent probe makes
+                # `recovered=0` legible — you can see *who* was checked.
+                log.info(
+                    "robotaua.pending_probe_no_phone",
+                    apply=apply_id,
+                    name=entry.get("name"),
+                    first_seen=entry.get("first_seen"),
+                )
                 continue
             row = {
                 "id": int(apply_id),

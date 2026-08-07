@@ -22,6 +22,7 @@ import structlog
 
 from src.api.inbound_router import IngestPayload, InboundRouter
 from src.common import vacancies
+from src.common.state import state_dir
 from src.integrations.workua_api import (
     WorkUaApiError,
     WorkUaAuthError,
@@ -40,7 +41,19 @@ from src.match.scorer import MatchScorer
 
 log = structlog.get_logger()
 
-CURSOR_PATH = Path(".cache/workua_cursor.json")
+CURSOR_NAME = "workua_cursor.json"
+
+
+def _cursor_path() -> Path:
+    """Cursor lives on the mounted state volume, not inside the image.
+
+    It used to be a hardcoded `.cache/workua_cursor.json`, which resolves to
+    `/app/.cache/` in the container — a path baked into the image and therefore
+    wiped by every `docker compose build`. Each deploy silently reset
+    `responses_last_id` and the poller re-walked its backfill window. Same
+    directory the robota.ua cursors already use.
+    """
+    return state_dir() / CURSOR_NAME
 
 
 @dataclass
@@ -55,17 +68,19 @@ class PollStats:
 
 
 def _load_cursor() -> dict[str, Any]:
-    if not CURSOR_PATH.exists():
+    path = _cursor_path()
+    if not path.exists():
         return {}
     try:
-        return json.loads(CURSOR_PATH.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
 
 def _save_cursor(state: dict[str, Any]) -> None:
-    CURSOR_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CURSOR_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    path = _cursor_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _allowed_vacancy_ids() -> set[int]:

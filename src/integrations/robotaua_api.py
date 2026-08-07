@@ -45,6 +45,10 @@ from pathlib import Path
 import structlog
 
 from src.common.settings import get_settings
+# Defined here until 2026-08-08, then moved to src/common/state.py so the work.ua
+# poller could stop hardcoding `.cache/` and losing its cursor on every build.
+# Re-exported because robotaua_sync and robotaua_chat import the name from here.
+from src.common.state import state_dir
 
 log = structlog.get_logger()
 
@@ -104,22 +108,6 @@ class RobotaUaAuthError(RobotaUaError):
 
 class RobotaUaBlockedError(RobotaUaError):
     """Cloudflare served a challenge instead of the API response."""
-
-
-def state_dir() -> Path:
-    """Where the token + cursor live.
-
-    Containers mount ./state as /state and point STATE_PATH at a file inside it,
-    so we reuse that directory — a bare .cache/ inside the image would be wiped
-    on every deploy and the poller would re-ingest its whole backfill window.
-    """
-    explicit = (os.getenv("ROBOTAUA_STATE_DIR") or "").strip()
-    if explicit:
-        return Path(explicit)
-    state_path = (os.getenv("STATE_PATH") or "").strip()
-    if state_path:
-        return Path(state_path).parent
-    return Path(".cache")
 
 
 STATUS_NAME = "robotaua_status.json"
