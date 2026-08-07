@@ -1,10 +1,10 @@
 from src.call.script_template import render_system_prompt
 
 
-def test_renders_with_defaults_uses_kozyr_trans():
+def test_renders_with_defaults_uses_example_logistics():
     out = render_system_prompt()
     assert "Єва" in out
-    assert "Kozyr Trans" in out
+    assert "Example Logistics" in out
     assert "Менеджер з продажу, логіст" in out
     assert "30 до 65 тисяч гривень" in out
     assert "9:00 до 17:00" in out

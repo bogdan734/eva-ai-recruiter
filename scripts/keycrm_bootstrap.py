@@ -74,7 +74,7 @@ def api(method: str, path: str, body: dict | None = None) -> tuple[int, dict | l
             return e.code, body_text
 
 
-FUNNEL_NAME = "AI Recruiter — Kozyr Trans"
+FUNNEL_NAME = "AI Recruiter — Example Logistics"
 
 STAGES = [
     ("new_resume", "🆕 Нові резюме", "#9CA3AF"),

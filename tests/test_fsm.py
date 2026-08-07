@@ -7,7 +7,7 @@ def test_fsm_starts_at_greeting():
     assert int(s.step) == 1
 
 
-def test_fsm_has_11_steps_kozyr_trans_flow():
+def test_fsm_has_11_steps_example_logistics_flow():
     assert int(Step.GREETING) == 1
     assert int(Step.CONFIRM_INTENT) == 2
     assert int(Step.REGION_CHECK) == 3
@@ -38,7 +38,7 @@ def test_fsm_does_not_advance_past_handoff():
     assert s.step == Step.HANDOFF
 
 
-def test_fsm_to_dict_includes_kozyr_fields():
+def test_fsm_to_dict_includes_exampleco_fields():
     s = CallState(
         step=Step.SALARY,
         language="ru",

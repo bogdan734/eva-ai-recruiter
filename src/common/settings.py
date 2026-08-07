@@ -95,9 +95,9 @@ class Settings(BaseSettings):
     profile_war_pause_year: int = 2022
     profile_war_pause_tolerance: int = 1
 
-    # Persona + vacancy defaults (Kozyr Trans)
+    # Persona + vacancy defaults (Example Logistics)
     agent_name: str = "Єва"
-    company_name: str = "Kozyr Trans"
+    company_name: str = "Example Logistics"
     company_pitch: str = (
         "Наша компанія займається організацією вантажоперевезень як для приватних "
         "осіб, так і для підприємств."

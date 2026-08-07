@@ -92,12 +92,12 @@ def test_build_lead_payload_minimal():
         # No field ids → no custom_fields in payload
         body = build_lead_payload(
             name="Іван Петренко",
-            phone="+380671234567",
+            phone="+380XXXXXXXXX",
             email="ivan@example.com",
             custom={"region": "Київська", "match_score": 75},
         )
         assert body["title"] == "Іван Петренко"
-        assert body["contact"]["phone"] == "+380671234567"
+        assert body["contact"]["phone"] == "+380XXXXXXXXX"
         assert body["contact"]["email"] == "ivan@example.com"
         assert "custom_fields" not in body  # all FIELD_MAP entries are 0
     finally:
@@ -112,7 +112,7 @@ def test_build_lead_payload_with_mapping():
         keycrm_fields.FIELD_MAP["match_score"] = 106
         body = build_lead_payload(
             name="Іван",
-            phone="+380671234567",
+            phone="+380XXXXXXXXX",
             email=None,
             custom={"region": "Київська", "match_score": 75, "unknown_key": "x"},
             stage_id=5,
