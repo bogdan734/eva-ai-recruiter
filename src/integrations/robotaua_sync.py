@@ -317,6 +317,27 @@ def worth_opening(apply: dict, region: str | None) -> bool:
     return any(marker in spec for marker in ROLE_MARKERS)
 
 
+def _pending_as_apply(apply_id: str, entry: dict) -> dict:
+    """Rebuild an apply-shaped dict from a parked entry.
+
+    Parked entries store the same facts under snake_case keys, so the intake
+    helpers — which expect robota.ua's own camelCase payload — can be reused on
+    the backlog instead of duplicated. `filePath` may be missing on entries
+    parked before the CV reader existed; `download_attachment` derives the URL
+    from the apply id in that case.
+    """
+    return {
+        "id": int(apply_id),
+        "name": entry.get("name"),
+        "vacancyId": entry.get("vacancy_id"),
+        "cityId": entry.get("city_id"),
+        "speciality": entry.get("speciality"),
+        "resumeType": entry.get("resume_type"),
+        "fileName": entry.get("file_name"),
+        "filePath": entry.get("file_path"),
+    }
+
+
 async def _try_attached_file(
     client: RobotaUaClient,
     router: InboundRouter,
@@ -694,13 +715,30 @@ async def poll_responses(
             if probes_left <= 0:
                 continue
             resume_id = int(entry.get("resume_id") or 0)
-            if not resume_id:
-                continue
             probes_left -= 1
             # Stamped before the request, not after: a probe that ends in a block
             # or an error has still cost us the slot, and leaving the stamp off
             # would hand this same entry the next poll's budget as well.
             entry["last_probe"] = datetime.utcnow().isoformat(timespec="seconds")
+            if not resume_id:
+                # `AttachedFile`: resumeId is 0 by design and /resume/{id} has
+                # nothing to return, so the number only exists inside the
+                # uploaded document. These used to dead-end here and sat in the
+                # queue until the 30-day TTL dropped them. Reading the file costs
+                # the one request a resume probe would have cost, and the entries
+                # parked before the reader existed never captured `filePath` —
+                # `download_attachment` derives it from the apply id instead.
+                try:
+                    if await _try_attached_file(
+                        client, router, _pending_as_apply(apply_id, entry), cities, stats, dry=dry
+                    ):
+                        stats.recovered += 1
+                        pending.pop(apply_id, None)
+                except RobotaUaBlockedError as e:
+                    blocked = True
+                    log.warning("robotaua.blocked_on_pending", apply=apply_id, error=str(e))
+                    break
+                continue
             try:
                 resume = await client.get_resume(resume_id)
             except RobotaUaBlockedError as e:
