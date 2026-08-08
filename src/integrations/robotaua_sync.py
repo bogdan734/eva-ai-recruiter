@@ -689,6 +689,10 @@ async def poll_responses(
     # stamp, so they sort ahead of everyone — the whole backlog gets one probe
     # before anyone gets a second, and the paid openings only win among equals.
     opened_here = set(cursor.get("contacts_opened") or [])
+    # Candidates who hid the number themselves: robota.ua already told us the
+    # opening would reveal nothing, so never pay for them a second time.
+    hidden_ids = set(cursor.get("phones_hidden") or [])
+    opens_left = _env_int("ROBOTAUA_BACKLOG_OPEN_PER_RUN", 1)
     for apply_id in sorted(
         pending,
         key=lambda k: (
@@ -715,6 +719,50 @@ async def poll_responses(
             if probes_left <= 0:
                 continue
             resume_id = int(entry.get("resume_id") or 0)
+
+            # An apply we have already probed once and whose phone is still
+            # hidden will not come back on its own — nobody is going to open
+            # that contact for us. Re-probing it every pass is what this loop
+            # did for four days. If the funnel would actually take the person,
+            # spend one of the account's authorised openings and be done.
+            #
+            # Budget: an opening costs two requests (open-contact, then the
+            # resume) where a probe costs one, so it consumes the whole poll's
+            # probe allowance. robota.ua therefore sees the same number of
+            # requests per poll it saw before — the number the Cloudflare
+            # backoff was tuned against. One opening per poll, quota permitting,
+            # is ~4/hour: the 25 the client authorised are the binding limit
+            # here, not the clock.
+            if (
+                opens_left > 0
+                and resume_id
+                and probes_left >= PENDING_PROBE_PER_RUN
+                and entry.get("last_probe")  # never pay before checking for free
+                and apply_id not in hidden_ids
+                # Already bought once and still parked: the opening did not
+                # produce a number, so buying it again buys the same nothing.
+                # Three of the nine that pass the gate are in this state.
+                and apply_id not in opened_here
+            ):
+                parked = _pending_as_apply(apply_id, entry)
+                city_id = entry.get("city_id")
+                region = (cities.get(int(city_id)) or {}).get("region") if city_id else None
+                if worth_opening(parked, region):
+                    opens_left -= 1
+                    probes_left -= PENDING_PROBE_PER_RUN
+                    entry["last_probe"] = datetime.utcnow().isoformat(timespec="seconds")
+                    try:
+                        if await _try_auto_open(
+                            client, router, parked, cities, cursor, stats, dry=dry
+                        ):
+                            stats.recovered += 1
+                            pending.pop(apply_id, None)
+                    except RobotaUaBlockedError as e:
+                        blocked = True
+                        log.warning("robotaua.blocked_on_pending", apply=apply_id, error=str(e))
+                        break
+                    continue
+
             probes_left -= 1
             # Stamped before the request, not after: a probe that ends in a block
             # or an error has still cost us the slot, and leaving the stamp off
