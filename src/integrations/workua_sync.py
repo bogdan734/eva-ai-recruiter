@@ -277,11 +277,18 @@ async def search_and_qualify(
     scorer: MatchScorer | None = None,
     client: WorkUaClient | None = None,
     router: InboundRouter | None = None,
+    vacancy_key: str | None = None,
+    min_score: float = 0.55,
 ) -> dict[str, int]:
     """⚠️ PAID — every match opens a contact.
 
     Search for resumes matching `query`, then for each candidate run profile filter
     and embedding match before pushing to KeyCRM.
+
+    `vacancy_key` decides which vacancy these people belong to: their funnel, the
+    screening rules and the script Єва reads them. Without it a searched candidate
+    lands on the default vacancy no matter what was searched for — the same gap
+    the board pullers had until `candidates.vacancy_key` existed.
     """
     client = client or WorkUaClient()
     router = router or InboundRouter()
@@ -351,10 +358,11 @@ async def search_and_qualify(
             stats["match_rejected"] += 1
             continue
 
-        if score.score < 0.55:
+        if score.score < min_score:
             stats["match_rejected"] += 1
             continue
 
+        route = vacancies.get(vacancy_key)
         ingest = await router.ingest(
             IngestPayload(
                 full_name=full_name or "Кандидат work.ua",
@@ -365,6 +373,10 @@ async def search_and_qualify(
                 source="workua_search",
                 match_score=score.score,
                 vacancy_id=vacancy_id,
+                # Route the find like any other intake, or a searched candidate
+                # ends up in the default funnel with the default script.
+                vacancy_key=route.key,
+                vacancy_name=route.label,
             )
         )
         if ingest.duplicate:

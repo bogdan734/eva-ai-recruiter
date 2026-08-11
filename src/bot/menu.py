@@ -95,6 +95,7 @@ def _main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📞 Тестовий дзвінок", callback_data="call:new")],
         [InlineKeyboardButton("🎯 Критерії кандидатів", callback_data="nav:crit")],
         [InlineKeyboardButton("💼 Параметри вакансії", callback_data="nav:vac")],
+        [InlineKeyboardButton("🔎 Пошук резюме", callback_data="srch:pick")],
         [InlineKeyboardButton("📊 Статус", callback_data="act:status"),
          InlineKeyboardButton("📋 Звіт", callback_data="act:report")],
         [InlineKeyboardButton(calls_lbl, callback_data="act:toggle_calls")],
@@ -505,6 +506,65 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return await edit(f"❌ {e}", _vac_ops_kb(key))
         return await edit(_vac_list_text(), _vac_kb())
 
+    # ---- paid resume search ----
+    if data == "srch:pick":
+        rows = [
+            [InlineKeyboardButton(f"🔎 {v.label}", callback_data=f"srch:v:{k}")]
+            for k, v in _vacancies.all_vacancies().items()
+        ]
+        rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="nav:main")])
+        return await edit(
+            "🔎 <b>Пошук резюме на work.ua</b>\n\n"
+            "Єва сама шукає кандидатів у базі резюме, а не чекає відгуків.\n\n"
+            "⚠️ <b>Це платно.</b> За кожного знайденого кандидата з бази "
+            "списується відкриття контакту з вашого рахунку на work.ua.\n\n"
+            "Під яку вакансію шукаємо?",
+            InlineKeyboardMarkup(rows),
+        )
+
+    if data.startswith("srch:v:"):
+        key = data.split(":", 2)[2]
+        ctx.user_data["srch_vac"] = key
+        ctx.user_data["await"] = "srch_query"
+        return await edit(
+            f"🔎 <b>{_vacancies.get(key).label}</b>\n\n"
+            "Надішліть, кого шукаємо — як написали б у пошуку на сайті.\n"
+            "Напр.: <code>менеджер з продажу логістика</code>\n\n"
+            "Далі буде показано, скільки знайдено, і ви підтвердите обробку.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Скасувати", callback_data="nav:main")]]),
+        )
+
+    if data.startswith("srch:go:"):
+        limit = int(data.split(":", 2)[2])
+        key = ctx.user_data.get("srch_vac") or _vacancies.DEFAULT.key
+        query = ctx.user_data.get("srch_query") or ""
+        if not query:
+            return await edit("❌ Запит загубився. Почніть спочатку.", _main_kb())
+        await edit(f"🔎 Шукаю «{query}»… Це може зайняти хвилину.")
+        from src.integrations.workua_sync import search_and_qualify
+
+        vac = _vacancies.get(key)
+        try:
+            stats = await search_and_qualify(
+                query=query,
+                vacancy_id=_vacancies.LOCAL_FK,
+                vacancy_text=f"{vac.label}. {_vstore.spoken(vac, 'spoken_benefits')}",
+                vacancy_key=key,
+                limit=limit,
+            )
+        except Exception as e:  # noqa: BLE001 — report, never crash the bot
+            return await edit(f"❌ Пошук не вдався: {e}", _main_kb())
+        return await edit(
+            f"🔎 <b>Пошук завершено</b> — {vac.label}\n\n"
+            f"Знайдено в базі: <b>{stats.get('found', 0)}</b>\n"
+            f"➕ Додано в чергу: <b>{stats.get('accepted', 0)}</b>\n"
+            f"↩️ Вже були в базі: {stats.get('duplicates', 0)}\n"
+            f"🎯 Не пройшли фільтр: {stats.get('profile_rejected', 0)}\n"
+            f"📉 Слабкий збіг: {stats.get('match_rejected', 0)}\n"
+            f"⚠️ Помилок: {stats.get('errors', 0)}",
+            _main_kb(),
+        )
+
     if data == "vacnew":
         ctx.user_data["await"] = "vacnew_key"
         return await edit(
@@ -722,6 +782,25 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return await reply(f"❌ {e}\n\nСпробуйте ще раз.")
         ctx.user_data.pop("await", None)
         return await reply("✅ Збережено.\n\n" + _vac_ops_text(key), _vac_ops_kb(key))
+
+    if awaiting == "srch_query":
+        ctx.user_data.pop("await", None)
+        ctx.user_data["srch_query"] = text
+        key = ctx.user_data.get("srch_vac") or _vacancies.DEFAULT.key
+        # Ask for the batch size instead of running straight away. Each accepted
+        # candidate costs a contact opening, so the number has to be a deliberate
+        # choice, not whatever the search happened to return.
+        return await reply(
+            f"🔎 <b>{_vacancies.get(key).label}</b>\nЗапит: <code>{text}</code>\n\n"
+            "⚠️ Кожен доданий кандидат <b>витрачає відкриття контакту</b> на work.ua.\n\n"
+            "Скільки резюме обробити за раз?",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("5 (обережно)", callback_data="srch:go:5"),
+                 InlineKeyboardButton("10", callback_data="srch:go:10")],
+                [InlineKeyboardButton("20", callback_data="srch:go:20")],
+                [InlineKeyboardButton("⬅️ Скасувати", callback_data="nav:main")],
+            ]),
+        )
 
     if awaiting == "vacnew_key":
         try:
