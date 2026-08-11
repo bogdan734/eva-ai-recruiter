@@ -310,6 +310,11 @@ async def reconcile_unfinalized() -> None:
                     duration_sec=dur,
                     recording_url=(d.get("recordingUrl")
                                    or (d.get("artifact") or {}).get("recordingUrl")),
+                    # Vapi hands us the reason and this path used to drop it, which
+                    # is why 434 rows carry an empty `ended_reason` — including every
+                    # one of the 77 SIP 403s of 05–11.08. Without it nothing
+                    # downstream can tell a refused call from an unanswered one.
+                    ended_reason=d.get("endedReason"),
                 )
                 fixed += 1
             except Exception as e:

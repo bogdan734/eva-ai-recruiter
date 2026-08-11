@@ -20,6 +20,7 @@ import os
 from sqlalchemy import func, select
 
 from src.api.inbound_router import IngestPayload, InboundRouter
+from src.call import line_health
 from src.call.script_template import render_system_prompt
 from src.call.summarizer import CallSummary, Summarizer
 from src.call.vapi_client import VapiClient
@@ -405,6 +406,76 @@ class CallOrchestrator:
     ) -> None:
         if ended_reason:
             db_call.ended_reason = str(ended_reason)[:64]
+
+        # Who failed — the carrier, the number, or the candidate? Everything below
+        # this point assumes the phone actually rang, and for six days in August it
+        # had not: Stream Telecom refused every call with SIP 403 and the dispatcher
+        # quietly spent an attempt on each one until twelve real candidates were
+        # filed as `unreachable`. Settle fault first.
+        fault = line_health.classify(ended_reason)
+        if fault == "provider_fault":
+            phone = candidate.phone_e164 if candidate else None
+            db_call.ended_at = datetime.utcnow()
+            db_call.duration_sec = int(duration_sec)
+            db_call.status = CallStatus.FAILED
+            if candidate is not None:
+                # Give the attempt back. The candidate never got a ring, so holding
+                # it against them — and eventually filing them as unreachable — is
+                # simply wrong. Same rollback the place-call failure path does.
+                async with session_scope() as sess:
+                    cand = await sess.get(Candidate, candidate.id)
+                    if cand:
+                        cand.call_attempts = max(0, cand.call_attempts - 1)
+                        if cand.status == CandidateStatus.CALLING:
+                            cand.status = CandidateStatus.IN_CALL_QUEUE
+            log.warning(
+                "orchestrator.provider_fault",
+                candidate_id=getattr(candidate, "id", None),
+                call_id=db_call.id, reason=ended_reason,
+            )
+            # No CRM write, no Telegram fallback: nothing happened that the
+            # recruiter or the candidate should ever hear about.
+            if line_health.record_provider_fault(phone, ended_reason):
+                line_health.pause_calls(f"SIP fault streak: {ended_reason}")
+                await line_health.alert_admins(
+                    "🔴 <b>Обдзвін зупинено автоматично</b>\n\n"
+                    f"Оператор відхиляє вихідні: <code>{ended_reason}</code>\n"
+                    "Поспіль невдалих дзвінків на різні номери — телефони "
+                    "кандидатів не дзвонили взагалі.\n\n"
+                    "Спроби кандидатам НЕ зараховані, черга збережена.\n"
+                    "Після відповіді оператора зняти паузу через /menu ▶️"
+                )
+            return
+        if fault == "dead_number" and candidate is not None:
+            # The network says there is no such subscriber. Redialling produces the
+            # same answer every time, so spend nothing more on it.
+            async with session_scope() as sess:
+                cand = await sess.get(Candidate, candidate.id)
+                if cand:
+                    cand.status = CandidateStatus.CLOSED
+            db_call.ended_at = datetime.utcnow()
+            db_call.duration_sec = int(duration_sec)
+            db_call.status = CallStatus.FAILED
+            log.info(
+                "orchestrator.dead_number",
+                candidate_id=candidate.id, phone=candidate.phone_e164, reason=ended_reason,
+            )
+            try:
+                if candidate.keycrm_lead_id:
+                    await self._keycrm.move_to_status(
+                        candidate.keycrm_lead_id, STAGE_MAP.get("not_actual")
+                    )
+                    await self._keycrm.append_manager_comment(
+                        candidate.keycrm_lead_id,
+                        f"Номер не існує в мережі оператора ({ended_reason}). "
+                        "Дзвінки припинено.",
+                    )
+            except Exception as e:  # noqa: BLE001 — CRM must not block the disposition
+                log.warning("orchestrator.dead_number_crm_failed", error=str(e))
+            return
+        if (ended_reason or "").strip():
+            # A call the carrier placed — whatever the candidate did with it.
+            line_health.record_success()
         # An empty call (no transcript — dropped, busy, 0s) must never overwrite a real
         # conversation this candidate already had. Vapi/reconcile can finalize a dead
         # attempt AFTER the successful one, which used to blank the CRM card ("Немає
