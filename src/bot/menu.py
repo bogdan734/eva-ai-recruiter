@@ -22,6 +22,8 @@ from telegram.ext import (
 )
 
 from src.bot.admin import _is_admin, _state, _save_state, calls_paused
+from src.common import vacancies as _vacancies
+from src.common import vacancy_store as _vstore
 from src.common.settings import get_settings
 
 # criteria fields the menu can edit -> the env var the Settings model reads
@@ -120,14 +122,96 @@ def _thr_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([row[:3], row[3:], [InlineKeyboardButton("⬅️ Назад", callback_data="nav:crit")]])
 
 
-def _vac_kb() -> InlineKeyboardMarkup:
+def _vac_global_kb() -> InlineKeyboardMarkup:
+    """The original global fields — now the fallback under every vacancy."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📌 Назва вакансії", callback_data="ed:vac_title")],
         [InlineKeyboardButton("💰 Зарплата", callback_data="ed:vac_salary")],
         [InlineKeyboardButton("🗓 Графік", callback_data="ed:vac_schedule")],
         [InlineKeyboardButton("🎁 Умови/бонуси", callback_data="ed:vac_benefits")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="nav:main")],
+        [InlineKeyboardButton("⬅️ До списку вакансій", callback_data="nav:vac")],
     ])
+
+
+def _vac_list_text() -> str:
+    lines = ["💼 <b>Вакансії</b>", ""]
+    for key, vac in _vacancies.VACANCIES.items():
+        described = _vstore.describe(_vacancies.get(key))
+        own = sum(1 for f in _vstore.EDITABLE if described[f]["source"] == "панель")
+        state = "Єва дзвонить" if vac.calls_enabled else "лише збір відгуків"
+        detail = f"свій текст: {own} з {len(_vstore.EDITABLE)} полів" if own else "текст загальний"
+        lines.append(f"• <b>{vac.label}</b> — {state}, {detail}")
+    lines += [
+        "",
+        "Оберіть вакансію, щоб змінити, що Єва про неї говорить.",
+        "«Загальні» — текст для тих вакансій, які свого не мають.",
+    ]
+    return "\n".join(lines)
+
+
+def _vac_kb() -> InlineKeyboardMarkup:
+    """Vacancy picker. Editing per vacancy is the point — before this every
+    candidate heard one global text whichever posting they answered."""
+    rows = []
+    for key, vac in _vacancies.VACANCIES.items():
+        calls = "📞" if vac.calls_enabled else "📥"
+        rows.append([InlineKeyboardButton(f"{calls} {vac.label}", callback_data=f"vac:{key}")])
+    rows.append([InlineKeyboardButton("🌐 Загальні (для всіх)", callback_data="vac:__global__")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="nav:main")])
+    return InlineKeyboardMarkup(rows)
+
+
+_VAC_ICONS = {
+    "spoken_title": "📌",
+    "spoken_salary": "💰",
+    "spoken_schedule": "🗓",
+    "spoken_benefits": "🎁",
+    "spoken_pitch": "🏢",
+}
+
+
+def _vac_one_kb(key: str) -> InlineKeyboardMarkup:
+    vac = _vacancies.get(key)
+    described = _vstore.describe(vac)
+    rows = []
+    for field in _vstore.EDITABLE:
+        label = _vstore.LABELS[field]
+        row = [InlineKeyboardButton(
+            f"{_VAC_ICONS[field]} {label}", callback_data=f"vacf:{key}:{field}"
+        )]
+        # Reset only where there is an override to reset. A blank spacer button
+        # would keep the columns even, but Telegram rejects whitespace-only text.
+        if described[field]["source"] == "панель":
+            row.append(InlineKeyboardButton("↩️", callback_data=f"vacr:{key}:{field}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅️ До списку вакансій", callback_data="nav:vac")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _vac_one_text(key: str) -> str:
+    vac = _vacancies.get(key)
+    s = get_settings()
+    globals_ = {
+        "spoken_title": s.default_vacancy_title,
+        "spoken_salary": s.default_vacancy_salary,
+        "spoken_schedule": s.default_vacancy_schedule,
+        "spoken_benefits": s.default_vacancy_benefits,
+        "spoken_pitch": s.company_pitch,
+    }
+    lines = [f"💼 <b>{vac.label}</b>", ""]
+    if not vac.calls_enabled:
+        lines.append("📥 Єва цю вакансію <b>не обдзвонює</b> — лише збирає відгуки.")
+        lines.append("")
+    for field in _vstore.EDITABLE:
+        info = _vstore.describe(vac)[field]
+        value = info["value"] or globals_.get(field, "")
+        mark = "" if info["source"] == "панель" else "  <i>(загальне)</i>"
+        shown = (value or "—")[:110]
+        lines.append(f"{_VAC_ICONS[field]} <b>{_vstore.LABELS[field]}</b>{mark}\n{shown}")
+    lines.append("")
+    lines.append("Натисніть поле, щоб змінити. ↩️ повертає до загального значення.")
+    lines.append("⚠️ Єва це <b>вимовляє</b> — числа пишіть словами.")
+    return "\n".join(lines)
 
 
 def _call_kb(cfg: dict[str, Any]) -> InlineKeyboardMarkup:
@@ -269,7 +353,36 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "nav:crit":
         return await edit(_crit_text(), _crit_kb())
     if data == "nav:vac":
-        return await edit(_vac_text(), _vac_kb())
+        return await edit(_vac_list_text(), _vac_kb())
+    if data == "noop":
+        return
+
+    # ---- per-vacancy script ----
+    if data.startswith("vac:"):
+        key = data.split(":", 1)[1]
+        if key == "__global__":
+            # The old global fields, still the fallback for any vacancy that has
+            # not set its own text.
+            return await edit(_vac_text(), _vac_global_kb())
+        return await edit(_vac_one_text(key), _vac_one_kb(key))
+
+    if data.startswith("vacf:"):
+        _, key, field = data.split(":", 2)
+        ctx.user_data["await"] = f"vacf:{key}:{field}"
+        vac = _vacancies.get(key)
+        return await edit(
+            f"✏️ <b>{_vstore.LABELS[field]}</b> — {vac.label}\n\n"
+            "Надішліть новий текст.\n\n"
+            "⚠️ Єва це вимовляє вголос: числа словами "
+            "(<code>двадцять п’ять тисяч</code>, не <code>25000</code>), "
+            "латиницю уникайте (<code>бі-ту-бі</code>, не <code>B2B</code>).",
+            InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Скасувати", callback_data=f"vac:{key}")]]),
+        )
+
+    if data.startswith("vacr:"):
+        _, key, field = data.split(":", 2)
+        _vstore.clear_field(key, field)
+        return await edit(_vac_one_text(key), _vac_one_kb(key))
     if data == "nav:thr":
         return await edit("🎯 Оберіть поріг відбору:", _thr_kb())
 
@@ -468,7 +581,19 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if awaiting in ("vac_title", "vac_salary", "vac_schedule", "vac_benefits"):
         _apply_override(awaiting, text)
         ctx.user_data.pop("await", None)
-        return await reply("✅ Збережено.\n\n" + _vac_text(), _vac_kb())
+        return await reply("✅ Збережено для всіх вакансій.\n\n" + _vac_text(), _vac_global_kb())
+
+    if isinstance(awaiting, str) and awaiting.startswith("vacf:"):
+        _, key, field = awaiting.split(":", 2)
+        ctx.user_data.pop("await", None)
+        try:
+            _vstore.set_field(key, field, text)
+        except ValueError as e:
+            return await reply(f"❌ {e}")
+        return await reply(
+            f"✅ Збережено для «{_vacancies.get(key).label}».\n\n" + _vac_one_text(key),
+            _vac_one_kb(key),
+        )
 
     # ---- import candidates ----
     if awaiting == "cand_paste":
