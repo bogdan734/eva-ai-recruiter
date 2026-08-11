@@ -135,7 +135,7 @@ def _vac_global_kb() -> InlineKeyboardMarkup:
 
 def _vac_list_text() -> str:
     lines = ["💼 <b>Вакансії</b>", ""]
-    for key, vac in _vacancies.VACANCIES.items():
+    for key, vac in _vacancies.all_vacancies().items():
         described = _vstore.describe(_vacancies.get(key))
         own = sum(1 for f in _vstore.EDITABLE if described[f]["source"] == "панель")
         state = "Єва дзвонить" if vac.calls_enabled else "лише збір відгуків"
@@ -153,12 +153,86 @@ def _vac_kb() -> InlineKeyboardMarkup:
     """Vacancy picker. Editing per vacancy is the point — before this every
     candidate heard one global text whichever posting they answered."""
     rows = []
-    for key, vac in _vacancies.VACANCIES.items():
+    for key, vac in _vacancies.all_vacancies().items():
         calls = "📞" if vac.calls_enabled else "📥"
         rows.append([InlineKeyboardButton(f"{calls} {vac.label}", callback_data=f"vac:{key}")])
+    rows.append([InlineKeyboardButton("➕ Нова вакансія", callback_data="vacnew")])
     rows.append([InlineKeyboardButton("🌐 Загальні (для всіх)", callback_data="vac:__global__")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="nav:main")])
     return InlineKeyboardMarkup(rows)
+
+
+_OPS_ICONS = {
+    "label": "🏷",
+    "workua_ids": "🔵",
+    "robotaua_ids": "🟣",
+    "keycrm_pipeline_id": "📂",
+    "keycrm_status_id": "📍",
+    "calls_enabled": "📞",
+    "screen_enabled": "🎯",
+    "intake_enabled": "📥",
+    "open_paid_contacts": "💳",
+    "vacancy_url": "🔗",
+}
+
+
+def _ops_value(vac, field: str) -> str:
+    v = getattr(vac, field, None)
+    if field in _vstore.BOOL_FIELDS:
+        return "так" if v else "ні"
+    if field in _vstore.IDSET_FIELDS:
+        return ", ".join(str(x) for x in sorted(v or ())) or "—"
+    return str(v or "—")
+
+
+def _vac_ops_text(key: str) -> str:
+    vac = _vacancies.get(key)
+    lines = [f"⚙️ <b>{vac.label}</b> — збір і обдзвін", ""]
+    for f in _vstore.OPS_FIELDS:
+        lines.append(f"{_OPS_ICONS[f]} <b>{_vstore.OPS_LABELS[f]}</b>: {_ops_value(vac, f)}")
+    problems = _vstore.blockers(vac)
+    lines.append("")
+    if problems:
+        lines.append("⚠️ <b>Не готова до роботи:</b>")
+        lines += [f"   • {p}" for p in problems]
+        lines.append("")
+        lines.append("Поки це не заповнено, вмикати збір і дзвінки не можна.")
+    elif vac.intake_enabled:
+        lines.append("✅ Збір відгуків працює.")
+        lines.append("📞 Єва дзвонить." if vac.calls_enabled else "📥 Дзвінків немає — лише картки в CRM.")
+    else:
+        lines.append("⏸ Збір вимкнено — відгуки не потрапляють у CRM.")
+    return "\n".join(lines)
+
+
+def _vac_ops_kb(key: str) -> InlineKeyboardMarkup:
+    vac = _vacancies.get(key)
+    rows = []
+    for f in _vstore.OPS_FIELDS:
+        rows.append([InlineKeyboardButton(
+            f"{_OPS_ICONS[f]} {_vstore.OPS_LABELS[f]}: {_ops_value(vac, f)[:22]}",
+            callback_data=f"vacof:{key}:{f}",
+        )])
+    if _vstore.is_custom(key):
+        rows.append([InlineKeyboardButton("🗑 Видалити вакансію", callback_data=f"vacdel:{key}")])
+    rows.append([InlineKeyboardButton("⬅️ До вакансії", callback_data=f"vac:{key}")])
+    return InlineKeyboardMarkup(rows)
+
+
+_OPS_HINTS = {
+    "label": "Назва, як вона стоїть у KeyCRM у полі «Вакансія».",
+    "workua_ids": (
+        "ID вакансій на work.ua через кому. Це число з посилання: "
+        "<code>work.ua/jobs/<b>8249916</b>/</code>\nПорожньо — не збирати з work.ua."
+    ),
+    "robotaua_ids": (
+        "ID вакансій на robota.ua через кому — число з посилання на вакансію "
+        "в кабінеті.\nПорожньо — не збирати з robota.ua."
+    ),
+    "keycrm_pipeline_id": "Номер воронки в KeyCRM, куди складати картки.",
+    "keycrm_status_id": "Номер етапу в цій воронці, на який картка потрапляє першою.",
+    "vacancy_url": "Посилання на оголошення — його видно в картці кандидата.",
+}
 
 
 _VAC_ICONS = {
@@ -184,6 +258,7 @@ def _vac_one_kb(key: str) -> InlineKeyboardMarkup:
         if described[field]["source"] == "панель":
             row.append(InlineKeyboardButton("↩️", callback_data=f"vacr:{key}:{field}"))
         rows.append(row)
+    rows.append([InlineKeyboardButton("⚙️ Збір і обдзвін", callback_data=f"vacops:{key}")])
     rows.append([InlineKeyboardButton("⬅️ До списку вакансій", callback_data="nav:vac")])
     return InlineKeyboardMarkup(rows)
 
@@ -383,6 +458,62 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         _, key, field = data.split(":", 2)
         _vstore.clear_field(key, field)
         return await edit(_vac_one_text(key), _vac_one_kb(key))
+
+    # ---- how the vacancy is worked: boards, funnel, calls ----
+    if data.startswith("vacops:"):
+        key = data.split(":", 1)[1]
+        return await edit(_vac_ops_text(key), _vac_ops_kb(key))
+
+    if data.startswith("vacof:"):
+        _, key, field = data.split(":", 2)
+        vac = _vacancies.get(key)
+        # Booleans are a tap, not a typing exercise — and a typo in "так" would
+        # otherwise read as "ні" and quietly switch off someone's intake.
+        if field in _vstore.BOOL_FIELDS:
+            if field in ("intake_enabled", "calls_enabled") and not getattr(vac, field):
+                problems = _vstore.blockers(vac)
+                if problems:
+                    return await edit(
+                        "⚠️ Спершу заповніть:\n" + "\n".join(f"• {p}" for p in problems),
+                        _vac_ops_kb(key),
+                    )
+            _vstore.set_field(key, field, "ні" if getattr(vac, field) else "так")
+            return await edit(_vac_ops_text(key), _vac_ops_kb(key))
+        ctx.user_data["await"] = f"vacof:{key}:{field}"
+        return await edit(
+            f"✏️ <b>{_vstore.OPS_LABELS[field]}</b> — {vac.label}\n\n"
+            f"Зараз: <code>{_ops_value(vac, field)}</code>\n\n" + _OPS_HINTS.get(field, "Надішліть значення."),
+            InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Скасувати", callback_data=f"vacops:{key}")]]),
+        )
+
+    if data.startswith("vacdel:"):
+        key = data.split(":", 1)[1]
+        return await edit(
+            f"🗑 Видалити «{_vacancies.get(key).label}»?\n\n"
+            "Кандидати, які вже прийшли з неї, залишаться — зникне лише сама вакансія.",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Так, видалити", callback_data=f"vacdel2:{key}")],
+                [InlineKeyboardButton("⬅️ Ні, назад", callback_data=f"vacops:{key}")],
+            ]),
+        )
+
+    if data.startswith("vacdel2:"):
+        key = data.split(":", 1)[1]
+        try:
+            _vstore.delete(key)
+        except _vstore.VacancyStoreError as e:
+            return await edit(f"❌ {e}", _vac_ops_kb(key))
+        return await edit(_vac_list_text(), _vac_kb())
+
+    if data == "vacnew":
+        ctx.user_data["await"] = "vacnew_key"
+        return await edit(
+            "➕ <b>Нова вакансія</b>\n\n"
+            "Надішліть короткий ключ латиницею — він потрібен системі, "
+            "кандидати його не бачать.\n"
+            "Напр.: <code>driver</code>, <code>hr_manager</code>",
+            InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Скасувати", callback_data="nav:vac")]]),
+        )
     if data == "nav:thr":
         return await edit("🎯 Оберіть поріг відбору:", _thr_kb())
 
@@ -582,6 +713,26 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         _apply_override(awaiting, text)
         ctx.user_data.pop("await", None)
         return await reply("✅ Збережено для всіх вакансій.\n\n" + _vac_text(), _vac_global_kb())
+
+    if isinstance(awaiting, str) and awaiting.startswith("vacof:"):
+        _, key, field = awaiting.split(":", 2)
+        try:
+            _vstore.set_field(key, field, text)
+        except _vstore.VacancyStoreError as e:
+            return await reply(f"❌ {e}\n\nСпробуйте ще раз.")
+        ctx.user_data.pop("await", None)
+        return await reply("✅ Збережено.\n\n" + _vac_ops_text(key), _vac_ops_kb(key))
+
+    if awaiting == "vacnew_key":
+        try:
+            _vstore.create(text, text)  # label is fixed on the next step
+        except _vstore.VacancyStoreError as e:
+            return await reply(f"❌ {e}\n\nСпробуйте ще раз.")
+        ctx.user_data["await"] = f"vacof:{text.strip().lower()}:label"
+        return await reply(
+            "✅ Ключ прийнято.\n\nТепер надішліть назву, як вона має стояти в CRM.\n"
+            "Напр.: <code>Водій категорії Е</code>"
+        )
 
     if isinstance(awaiting, str) and awaiting.startswith("vacf:"):
         _, key, field = awaiting.split(":", 2)

@@ -113,14 +113,32 @@ ACCOUNTANT = Vacancy(
     intake_enabled=True,
 )
 
-VACANCIES: dict[str, Vacancy] = {v.key: v for v in (SALES, ACCOUNTANT)}
+# Shipped in code. The live registry is `all_vacancies()` — these are only the
+# starting point it merges panel edits over.
+SHIPPED: dict[str, Vacancy] = {v.key: v for v in (SALES, ACCOUNTANT)}
 
 DEFAULT = SALES
 
 
+def all_vacancies() -> dict[str, Vacancy]:
+    """Everything we recruit for right now: shipped defaults with the panel's
+    edits applied, plus vacancies created from the panel.
+
+    Read fresh every call rather than cached at import. The bot, the API and the
+    scheduler are separate processes: a vacancy added in the bot has to be
+    visible to the puller without restarting anything, and caching here is how
+    you get a vacancy that exists in one container and not the others.
+    """
+    from src.common import vacancy_store  # local import: the store imports nothing from here
+
+    out = {k: vacancy_store.apply(v) for k, v in SHIPPED.items()}
+    out.update(vacancy_store.custom_vacancies(Vacancy))
+    return out
+
+
 def get(key: str | None) -> Vacancy:
     """Route by canonical key; unknown keys fall back to the original pipeline."""
-    return VACANCIES.get((key or "").strip().lower(), DEFAULT)
+    return all_vacancies().get((key or "").strip().lower(), DEFAULT)
 
 
 def for_workua(job_id: int | str | None) -> Vacancy | None:
@@ -129,7 +147,7 @@ def for_workua(job_id: int | str | None) -> Vacancy | None:
         jid = int(job_id)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
-    for v in VACANCIES.values():
+    for v in all_vacancies().values():
         if jid in v.workua_ids:
             return v
     return None
@@ -141,7 +159,7 @@ def for_robotaua(vacancy_id: int | str | None) -> Vacancy | None:
         vid = int(vacancy_id)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
-    for v in VACANCIES.values():
+    for v in all_vacancies().values():
         if vid in v.robotaua_ids:
             return v
     return None
@@ -154,7 +172,7 @@ def workua_ids(*, calls_only: bool = False) -> set[int]:
     that funnel and our card would be a duplicate.
     """
     out: set[int] = set()
-    for v in VACANCIES.values():
+    for v in all_vacancies().values():
         if not v.intake_enabled:
             continue
         if calls_only and not v.calls_enabled:
@@ -170,7 +188,7 @@ def robotaua_ids(*, calls_only: bool = False) -> set[int]:
     with someone who applied to an intake-only vacancy.
     """
     out: set[int] = set()
-    for v in VACANCIES.values():
+    for v in all_vacancies().values():
         if not v.intake_enabled:
             continue
         if calls_only and not v.calls_enabled:
