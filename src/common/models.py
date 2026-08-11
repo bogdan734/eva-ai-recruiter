@@ -72,6 +72,13 @@ class Candidate(Base):
     match_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[CandidateStatus] = mapped_column(String(32), default=CandidateStatus.NEW_RESUME.value)
     vacancy_id: Mapped[int | None] = mapped_column(ForeignKey("vacancies.id"), nullable=True)
+    # Which vacancy of `src.common.vacancies` this person actually applied to.
+    # `vacancy_id` above cannot answer that: every puller writes `LOCAL_FK = 1`
+    # into it regardless of the posting, so the board's job id decided the routing
+    # at intake and was then discarded. Without this key Eva has no way to pick a
+    # script per vacancy — everyone hears the one global pitch from `.env`.
+    # NULL reads as `vacancies.DEFAULT`, which is what every pre-08.08 row is.
+    vacancy_key: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     call_attempts: Mapped[int] = mapped_column(Integer, default=0)
     # Candidate asked to be called back — the dispatcher picks them up once this
     # moment passes, instead of the promise quietly evaporating.

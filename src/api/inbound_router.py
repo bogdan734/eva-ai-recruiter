@@ -214,6 +214,9 @@ class InboundRouter:
                 source=payload.source,
                 match_score=payload.match_score,
                 vacancy_id=payload.vacancy_id,
+                # The routing decision the puller already made, persisted instead of
+                # discarded. `vacancy_id` is a constant and cannot carry it.
+                vacancy_key=payload.vacancy_key,
                 # MANAGER_REVIEW keeps intake-only candidates out of the dialer:
                 # the dispatcher only picks NEW_RESUME / IN_CALL_QUEUE, and the
                 # CRM stage sweep ignores this status too.

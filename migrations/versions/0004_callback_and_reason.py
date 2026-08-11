@@ -11,7 +11,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "0004"
-down_revision = "0003"
+down_revision = "0003_enum_to_varchar"
 branch_labels = None
 depends_on = None
 
