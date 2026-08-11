@@ -45,6 +45,22 @@ class Vacancy:
     # would be duplicates. See ACCOUNTANT below.
     intake_enabled: bool = True
 
+    # ---- what Єва says out loud, per vacancy -----------------------------
+    # Empty means "fall back to the global .env value", so adding these changed
+    # nothing for anyone until a vacancy fills them in. Before this the pitch was
+    # a single global text and every candidate heard the same one, whichever
+    # posting they had answered.
+    #
+    # ⚠️ These are SPOKEN, not read. Write numbers as words — "25000" comes out
+    # as a string of digits — and avoid latin script, which the TTS pronounces in
+    # English ("B2B" → write "бі-ту-бі"). Same rule as the .env values they
+    # replace; see the pronunciation lessons in the handoff.
+    spoken_title: str = ""        # посада, як Єва її називає
+    spoken_salary: str = ""       # зарплата словами
+    spoken_schedule: str = ""     # графік
+    spoken_benefits: str = ""     # умови й переваги
+    spoken_pitch: str = ""        # презентація компанії під цю вакансію
+
 
 SALES = Vacancy(
     key="sales",

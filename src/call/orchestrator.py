@@ -31,6 +31,8 @@ from src.common.models import Call, CallStatus, Candidate, CandidateStatus, Vaca
 from src.common.phone import normalize_phone
 from src.common import sources as _sources
 from src.common.settings import get_settings
+from src.common import vacancies as _vacancies
+from src.common import vacancy_store as _vacancy_store
 
 log = structlog.get_logger()
 
@@ -187,18 +189,31 @@ class CallOrchestrator:
                 if prev and prev.transcript and len(prev.transcript.strip()) > 40:
                     resume_transcript = prev.transcript.strip()[:1500]
 
+        # Which posting did this person answer? `candidate.vacancy_key` carries it
+        # now; NULL means the default vacancy, which is what every row created
+        # before 08.08 is. The spoken fields come from that vacancy — panel edit
+        # first, shipped default next, global .env last — so two vacancies can be
+        # pitched differently instead of everyone hearing one text.
+        route = _vacancies.get(candidate.vacancy_key)
+        spoken = _vacancy_store.spoken
         prompt = render_system_prompt(
             candidate_name=candidate.full_name,
             candidate_phone=candidate.phone_e164,
             candidate_position=candidate.desired_position or "",
             source=candidate.source,
-            vacancy_title=vacancy.title if vacancy else "",
+            company_pitch=spoken(route, "spoken_pitch") or None,
+            vacancy_schedule=spoken(route, "spoken_schedule") or None,
+            vacancy_benefits=spoken(route, "spoken_benefits") or None,
+            vacancy_title=spoken(route, "spoken_title") or (vacancy.title if vacancy else ""),
             vacancy_pitch=(vacancy.description.split("\n", 1)[0] if vacancy else ""),
             vacancy_requirements=(vacancy.description if vacancy else ""),
             vacancy_salary=(
-                f"{vacancy.salary_min}-{vacancy.salary_max} грн"
-                if vacancy and vacancy.salary_min
-                else "обговорюється з менеджером"
+                spoken(route, "spoken_salary")
+                or (
+                    f"{vacancy.salary_min}-{vacancy.salary_max} грн"
+                    if vacancy and vacancy.salary_min
+                    else "обговорюється з менеджером"
+                )
             ),
             vacancy_location=(vacancy.region if vacancy and vacancy.region else "Україна"),
         )
