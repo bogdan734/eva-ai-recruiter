@@ -25,7 +25,7 @@ from src.call.script_template import render_system_prompt
 from src.call.summarizer import CallSummary, Summarizer
 from src.call.vapi_client import VapiClient
 from src.common.db import session_scope
-from src.common.keycrm import KeyCRMClient
+from src.common.crm import CRMClient, get_crm
 from src.common.keycrm_fields import STAGE_MAP
 from src.common.models import Call, CallStatus, Candidate, CandidateStatus, Vacancy
 from src.common.phone import normalize_phone
@@ -150,12 +150,12 @@ class CallOrchestrator:
     def __init__(
         self,
         vapi: VapiClient | None = None,
-        keycrm: KeyCRMClient | None = None,
+        keycrm: CRMClient | None = None,
         summarizer: Summarizer | None = None,
         inbound_router: InboundRouter | None = None,
     ) -> None:
         self._vapi = vapi or VapiClient()
-        self._keycrm = keycrm or KeyCRMClient()
+        self._keycrm = keycrm or get_crm()
         self._summarizer = summarizer or Summarizer()
         self._inbound_router = inbound_router or InboundRouter(keycrm=self._keycrm)
         self._settings = get_settings()

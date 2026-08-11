@@ -136,10 +136,10 @@ async def sync_crm_stages() -> None:
     stages 1/2/31). Keeps candidate.status in step with hand edits in KeyCRM — which
     both the dispatcher and the Telegram gate read — so Eva goes quiet without needing a
     CRM→DB webhook. Runs periodically and at the start of every slot."""
-    from src.common.keycrm import KeyCRMClient
+    from src.common.crm import get_crm
     from src.common.keycrm_fields import crm_stage_stop_status
 
-    kc = KeyCRMClient()
+    kc = get_crm()
     changed = seen = 0
     try:
         async with session_scope() as session:
@@ -184,11 +184,11 @@ async def disposition_stale_unreachable() -> None:
     replied to the Telegram fallback within UNREACHABLE_GIVEUP_DAYS is given up: status
     → CLOSED and the CRM card → 'Не актуально' (32). Anyone who replied has already been
     moved off UNREACHABLE by the chat classifier, so only true no-shows are swept."""
-    from src.common.keycrm import KeyCRMClient
+    from src.common.crm import get_crm
     from src.common.keycrm_fields import STAGE_MAP
 
     cutoff = datetime.utcnow() - timedelta(days=UNREACHABLE_GIVEUP_DAYS)
-    kc = KeyCRMClient()
+    kc = get_crm()
     moved = 0
     try:
         async with session_scope() as session:

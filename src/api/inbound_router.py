@@ -27,11 +27,11 @@ import structlog
 from sqlalchemy import select
 
 from src.common.db import session_scope
+from src.common.crm import CRMClient, get_crm
 from src.common.keycrm import (
     DEFAULT_MANAGER_ID,
     FUNNEL_ID,
     STATUS_NEW,
-    KeyCRMClient,
 )
 from src.common.models import Candidate, CandidateStatus
 from src.common.phone import normalize_phone
@@ -98,8 +98,8 @@ def _format_manager_comment(payload: IngestPayload, region: str | None) -> str:
 
 
 class InboundRouter:
-    def __init__(self, keycrm: KeyCRMClient | None = None) -> None:
-        self._keycrm = keycrm or KeyCRMClient()
+    def __init__(self, keycrm: CRMClient | None = None) -> None:
+        self._keycrm = keycrm or get_crm()
         self._settings = get_settings()
 
     async def ingest(self, payload: IngestPayload) -> IngestResult:

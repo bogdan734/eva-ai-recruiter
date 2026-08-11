@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from src.common import sources
 from src.common.db import session_scope
-from src.common.keycrm import KeyCRMClient
+from src.common.crm import get_crm
 from src.common.keycrm_fields import STAGE_MAP, crm_stage_stop_status
 from src.common.models import Candidate, CandidateStatus
 from src.common.phone import normalize_phone
@@ -114,7 +114,7 @@ async def handle_tg_outcome(
         lead_id = cand.keycrm_lead_id
 
     # --- CRM: create the card if missing, then fill it and move the stage ---
-    kc = KeyCRMClient()
+    kc = get_crm()
     vacancy_name = s.default_vacancy_title
     note = (
         f"Джерело: Telegram ({handle})"
@@ -226,7 +226,7 @@ async def handle_tg_progress(
         cand_id = cand.id if cand else None
         lead_id = cand.keycrm_lead_id if cand else None
         lead_phone = cand.phone_e164 if cand else phone_key
-    kc = KeyCRMClient()
+    kc = get_crm()
     try:
         # Already carded → refresh the live transcript on that card (LD_1006). This is
         # also the merge point: a name-matched call card gets the Telegram dialog too.
