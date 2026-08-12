@@ -84,12 +84,15 @@ def classify(ended_reason: str | None) -> str:
     return "other"
 
 
-def _streak_needed() -> int:
-    return max(1, int(os.getenv("LINE_BREAKER_STREAK") or 5))
+def _faults_per_number() -> int:
+    """Refusals on ONE number before we stop dialling it."""
+    return max(1, int(os.getenv("LINE_FAULTS_PER_NUMBER") or 3))
 
 
-def _numbers_needed() -> int:
-    return max(1, int(os.getenv("LINE_BREAKER_MIN_NUMBERS") or 3))
+def _alert_after_numbers() -> int:
+    """Distinct dead numbers in a day before we say something. One number is a
+    number; a dozen is the trunk."""
+    return max(2, int(os.getenv("LINE_ALERT_AFTER_NUMBERS") or 8))
 
 
 def _path() -> Path:
@@ -112,63 +115,68 @@ def _save(data: dict) -> None:
         log.warning("line_health.save_failed", error=str(e))
 
 
-def record_success() -> None:
-    """Any call the carrier actually placed clears the streak."""
+def record_success(phone: str | None = None) -> None:
+    """A call the carrier actually placed. Clears that number's history."""
     data = _load()
-    if data.get("streak"):
-        log.info("line_health.recovered", streak_was=data.get("streak"))
-    _save({"streak": 0, "numbers": [], "tripped_at": data.get("tripped_at")})
-
-
-def record_provider_fault(phone: str | None, reason: str | None) -> bool:
-    """Count one carrier refusal. True when this one trips the breaker."""
-    data = _load()
-    streak = int(data.get("streak") or 0) + 1
-    numbers = list(data.get("numbers") or [])
-    if phone and phone not in numbers:
-        numbers.append(phone)
-    data = {
-        "streak": streak,
-        "numbers": numbers[-20:],
-        "last_reason": (reason or "")[:120],
-        "last_at": datetime.utcnow().isoformat(timespec="seconds"),
-        "tripped_at": data.get("tripped_at"),
-    }
-    trip = streak >= _streak_needed() and len(numbers) >= _numbers_needed()
-    if trip and not data.get("tripped_at"):
-        data["tripped_at"] = data["last_at"]
+    faults = dict(data.get("faults") or {})
+    if phone and faults.pop(phone, None):
+        log.info("line_health.number_recovered", phone=phone)
+    data["faults"] = faults
     _save(data)
-    log.warning(
-        "line_health.provider_fault",
-        streak=streak, distinct_numbers=len(numbers), reason=reason, phone=phone,
-    )
-    return bool(trip)
 
 
-def pause_calls(reason: str) -> None:
-    """Flip the same shared flag the admin bot's pause button writes.
+def record_provider_fault(phone: str | None, reason: str | None) -> int:
+    """Count one carrier refusal for this number. Returns its running total.
 
-    Written straight to STATE_PATH rather than through `src.bot.admin`, which
-    would drag aiogram into the orchestrator. `calls_paused()` re-reads the file
-    on every check, so the dispatcher sees this on its next slot.
+    Counted per number, not as one global streak. The first version counted
+    globally and paused all calling once three different numbers had failed —
+    which fired on 12.08 for three genuinely unroutable numbers while the trunk
+    was perfectly healthy, and stopped the client's recruiting for it.
     """
-    path = Path(os.getenv("STATE_PATH") or "/tmp/ai_recruiter_state.json")
-    try:
-        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    except Exception:  # noqa: BLE001
-        data = {}
-    if data.get("calls_paused"):
-        return
-    data["calls_paused"] = True
-    data["paused_by"] = "line_breaker"
-    data["paused_reason"] = reason[:200]
-    data["paused_at"] = datetime.utcnow().isoformat(timespec="seconds")
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        log.error("line_health.calls_paused", reason=reason)
-    except Exception as e:  # noqa: BLE001
-        log.warning("line_health.pause_failed", error=str(e))
+    if not phone:
+        return 0
+    data = _load()
+    faults = dict(data.get("faults") or {})
+    n = int(faults.get(phone) or 0) + 1
+    faults[phone] = n
+    data["faults"] = faults
+    data["last_reason"] = (reason or "")[:120]
+    data["last_at"] = datetime.utcnow().isoformat(timespec="seconds")
+    _save(data)
+    log.warning("line_health.provider_fault", phone=phone, count=n, reason=reason)
+    return n
+
+
+def should_skip(phone: str | None) -> bool:
+    """Has this number refused often enough that dialling it again is pointless?"""
+    if not phone:
+        return False
+    return int((_load().get("faults") or {}).get(phone) or 0) >= _faults_per_number()
+
+
+def dead_numbers() -> list[str]:
+    limit = _faults_per_number()
+    return [p for p, n in (_load().get("faults") or {}).items() if int(n) >= limit]
+
+
+def should_warn() -> bool:
+    """True once, when enough separate numbers have died to suggest the trunk.
+
+    A handful of unroutable numbers is normal and silent. A dozen in a day is the
+    line, and somebody should hear about it — but the calling never stops on its
+    own: a false positive that pauses a client's recruiting costs more than a
+    late warning.
+    """
+    data = _load()
+    dead = dead_numbers()
+    if len(dead) < _alert_after_numbers():
+        return False
+    today = datetime.utcnow().date().isoformat()
+    if data.get("warned_on") == today:
+        return False
+    data["warned_on"] = today
+    _save(data)
+    return True
 
 
 async def alert_admins(text: str) -> None:

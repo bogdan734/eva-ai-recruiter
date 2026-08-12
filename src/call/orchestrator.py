@@ -443,23 +443,73 @@ class CallOrchestrator:
                         cand.call_attempts = max(0, cand.call_attempts - 1)
                         if cand.status == CandidateStatus.CALLING:
                             cand.status = CandidateStatus.IN_CALL_QUEUE
+            faults = line_health.record_provider_fault(phone, ended_reason)
             log.warning(
                 "orchestrator.provider_fault",
                 candidate_id=getattr(candidate, "id", None),
-                call_id=db_call.id, reason=ended_reason,
+                call_id=db_call.id, reason=ended_reason, faults=faults,
             )
-            # No CRM write, no Telegram fallback: nothing happened that the
-            # recruiter or the candidate should ever hear about.
-            if line_health.record_provider_fault(phone, ended_reason):
-                line_health.pause_calls(f"SIP fault streak: {ended_reason}")
-                await line_health.alert_admins(
-                    "🔴 <b>Обдзвін зупинено автоматично</b>\n\n"
-                    f"Оператор відхиляє вихідні: <code>{ended_reason}</code>\n"
-                    "Поспіль невдалих дзвінків на різні номери — телефони "
-                    "кандидатів не дзвонили взагалі.\n\n"
-                    "Спроби кандидатам НЕ зараховані, черга збережена.\n"
-                    "Після відповіді оператора зняти паузу через /menu ▶️"
+            # Enough refusals on this one number and we stop dialling it. The
+            # carrier will not connect it, so redialling only churns the queue —
+            # but the person may well be reachable in Telegram, which is exactly
+            # what the `bad_connection` outreach is for.
+            if candidate is not None and line_health.should_skip(phone):
+                async with session_scope() as sess:
+                    cand = await sess.get(Candidate, candidate.id)
+                    if cand:
+                        cand.status = CandidateStatus.UNREACHABLE
+                log.info(
+                    "orchestrator.number_skipped",
+                    candidate_id=candidate.id, phone=phone, faults=faults,
                 )
+                # Reached inline rather than by falling through to the normal
+                # outreach block below: that block runs after summarisation, and
+                # there is no conversation here to summarise. It also lives below
+                # the assignment of `needs_tg_outreach`, so touching that name
+                # from up here is an UnboundLocalError waiting to happen — this
+                # function has been broken that exact way before.
+                try:
+                    async with httpx.AsyncClient(timeout=20) as tg:
+                        r = await tg.post(
+                            f"{self._settings.tguserbot_url}/send_outreach",
+                            json={
+                                "phone": candidate.phone_e164,
+                                "name": candidate.full_name or "",
+                                "kind": "bad_connection",
+                            },
+                        )
+                        log.info(
+                            "orchestrator.tg_outreach",
+                            kind="bad_connection", status=r.status_code,
+                            candidate_id=candidate.id,
+                        )
+                except Exception as e:  # noqa: BLE001 — outreach must not raise here
+                    log.warning("orchestrator.tg_outreach_failed", error=str(e))
+                try:
+                    if candidate.keycrm_lead_id:
+                        await self._keycrm.append_manager_comment(
+                            candidate.keycrm_lead_id,
+                            f"Оператор не пропускає виклики на цей номер "
+                            f"({faults} спроби, {ended_reason}). Дзвінки припинено, "
+                            "написали в Telegram.",
+                        )
+                except Exception as e:  # noqa: BLE001
+                    log.warning("orchestrator.skip_note_failed", error=str(e))
+                return
+            if line_health.should_warn():
+                # Never pauses calling — only says something. The previous version
+                # paused everything and did it on three numbers.
+                await line_health.alert_admins(
+                    "⚠️ <b>Багато номерів не проходять</b>\n\n"
+                    f"Оператор відхиляє виклики: <code>{ended_reason}</code>\n"
+                    f"Уже {len(line_health.dead_numbers())} різних номерів поспіль.\n\n"
+                    "Обдзвін <b>працює далі</b> — такі номери просто пропускаються, "
+                    "спроби кандидатам не зараховуються.\n"
+                    "Якщо це не окремі номери, а лінія — питання до оператора."
+                )
+            # Below the skip threshold: the candidate keeps their place in the
+            # queue and hears nothing. No CRM write, no message — as far as they
+            # are concerned the call never happened, which is true.
             return
         if fault == "dead_number" and candidate is not None:
             # The network says there is no such subscriber. Redialling produces the
@@ -490,7 +540,7 @@ class CallOrchestrator:
             return
         if (ended_reason or "").strip():
             # A call the carrier placed — whatever the candidate did with it.
-            line_health.record_success()
+            line_health.record_success(candidate.phone_e164 if candidate else None)
         # An empty call (no transcript — dropped, busy, 0s) must never overwrite a real
         # conversation this candidate already had. Vapi/reconcile can finalize a dead
         # attempt AFTER the successful one, which used to blank the CRM card ("Немає

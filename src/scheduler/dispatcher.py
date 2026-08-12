@@ -277,6 +277,13 @@ async def reconcile_unfinalized() -> None:
         rows = (await sess.execute(
             select(Call.vapi_call_id).where(
                 Call.status == CallStatus.FAILED,
+                # A call that already carries a reason has been finalized — it is
+                # not waiting for a webhook. Without this, calls the carrier
+                # refused were re-finalized every ten minutes forever: they end up
+                # FAILED by design, so reconcile kept picking them up, and each
+                # pass counted another carrier fault. Three refused calls became
+                # fifteen "faults" in one morning and tripped the line breaker.
+                Call.ended_reason.is_(None),
                 Call.vapi_call_id != "",
                 Call.started_at >= lo,
                 Call.started_at <= hi,
