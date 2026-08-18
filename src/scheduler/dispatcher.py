@@ -329,6 +329,28 @@ async def reconcile_unfinalized() -> None:
     if fixed:
         log.info("reconcile.done fixed=%d of=%d", fixed, len(rows))
 
+async def send_backfill_outreach() -> None:
+    """Daily: keep writing to the applicants the intake once walked past.
+
+    Off unless OUTREACH_BACKFILL_AFTER names a start moment — without one the
+    obvious query is "every sales candidate we never called", which is hundreds
+    of people here. The userbot caps how many go out a day, so this runs until
+    it says stop and picks the rest up tomorrow.
+    """
+    try:
+        from src.integrations.tg_outreach import configured_start, run_once
+        start = configured_start()
+        if start is None:
+            return
+        stats = await run_once(created_after=start, send=True)
+        log.info(
+            "outreach.backfill pending=%d sent=%d skipped=%d stopped_on=%s",
+            stats.pending, stats.sent, stats.skipped, stats.stopped_on or "-",
+        )
+    except Exception as e:  # noqa: BLE001
+        log.error("outreach.backfill failed: %s", e)
+
+
 async def check_workua_vacancy_liveness() -> None:
     """Twice a day: is each posting we recruit for still published?
 
@@ -433,6 +455,20 @@ def build_scheduler() -> AsyncIOScheduler:
         trigger=CronTrigger(minute="*/5", timezone=s.app_timezone),
         id="workua_poll",
         replace_existing=True,
+    )
+    # Write to the backfilled applicants a few at a time. Late morning on
+    # purpose: a job message at 07:00 reads as spam.
+    scheduler.add_job(
+        send_backfill_outreach,
+        trigger=CronTrigger(
+            hour=os.environ.get("OUTREACH_BACKFILL_CRON_HOUR", "11"),
+            minute=20,
+            timezone=s.app_timezone,
+        ),
+        id="backfill_outreach",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
     )
     # Is anything we recruit for still actually published? Two public page hits
     # per posting per day — far under WORKUA_SCRAPE_DAILY_LIMIT, and the only

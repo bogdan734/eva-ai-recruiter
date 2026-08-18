@@ -167,10 +167,24 @@ OUTREACH_COLLECT_INFO = (
 )
 
 
+OUTREACH_APPLIED_NO_CONTACT = (
+    "Доброго дня{name_part}! Мене звати Єва, я помічниця рекрутера компанії "
+    "Козир Транс — організація вантажоперевезень.\n\n"
+    "Ви відгукувались на нашу вакансію менеджера з продажу логістики, а ми "
+    "не встигли з вами зв'язатися. Перепрошуємо.\n\n"
+    "Якщо ви ще у пошуку роботи — напишіть, будь ласка, тут у чаті, розкажу "
+    "умови й відповім на питання. Або зателефонуйте нам: {phone}."
+)
+
 OUTREACH_TEMPLATES = {
     "no_answer": OUTREACH_NO_ANSWER,
     "bad_connection": OUTREACH_BAD_CONNECTION,
     "collect_info": OUTREACH_COLLECT_INFO,
+    # The other three all open with "ми телефонували" — they are for people a
+    # call already failed to reach. This one is for people we never called at
+    # all: the applicants our work.ua intake walked past while it was dead. It
+    # promises nothing about the posting still being up, because it is not.
+    "applied_no_contact": OUTREACH_APPLIED_NO_CONTACT,
 }
 
 
