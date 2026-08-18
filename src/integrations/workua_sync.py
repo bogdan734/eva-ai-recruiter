@@ -106,6 +106,186 @@ def _allowed_vacancy_ids() -> set[int]:
     return out
 
 
+SKIPPED_LEDGER_KEY = "skipped_jobs"
+
+
+def _record_skipped(cursor: dict[str, Any], *, job_id: int, response_id: int) -> None:
+    """Remember a response we could not route, so it can be replayed later.
+
+    The cursor moves on regardless — the feed is one stream shared by every
+    vacancy, and holding it back for a single unmapped posting would stall all
+    the others. Remembering the earliest id we walked past is what turns the
+    skip from a permanent loss into a recoverable one.
+    """
+    ledger = cursor.setdefault(SKIPPED_LEDGER_KEY, {})
+    # last_id is exclusive: to fetch response N again we have to ask from N-1.
+    entry = ledger.setdefault(str(job_id), {"resume_from": response_id - 1, "count": 0})
+    entry["resume_from"] = min(int(entry["resume_from"]), response_id - 1)
+    entry["count"] = int(entry.get("count", 0)) + 1
+
+
+def _due_catch_ups(cursor: dict[str, Any]) -> list[tuple[int, int]]:
+    """Skipped jobs somebody has since mapped in the vacancy registry.
+
+    Everything else stays on the ledger: the account also carries postings we
+    genuinely do not recruit for, and those must never be replayed.
+    """
+    out: list[tuple[int, int]] = []
+    for raw_id, entry in (cursor.get(SKIPPED_LEDGER_KEY) or {}).items():
+        try:
+            job_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if vacancies.for_workua(job_id) is not None:
+            out.append((job_id, int(entry.get("resume_from", 0))))
+    return sorted(out)
+
+
+async def _ingest_response(resp: Any, *, router: InboundRouter, stats: PollStats) -> None:
+    """Route one parsed response into its funnel.
+
+    Shared by the live poll and the catch-up replay on purpose: a recovered
+    response has to pass exactly the same gates as a fresh one, or the two paths
+    drift and only one of them gets the next screening fix.
+    """
+    if not resp.phone:
+        stats.rejected += 1
+        return
+
+    route = vacancies.for_workua(resp.job_id) or vacancies.DEFAULT
+    full_name = resp.fio or "Кандидат work.ua"
+    # Quick profile filter — region/age via from_type is not available here yet,
+    # but birth_date is.
+    birth_year = None
+    if resp.birth_date and len(resp.birth_date) >= 4:
+        try:
+            birth_year = int(resp.birth_date[:4])
+        except ValueError:
+            birth_year = None
+
+    # The portrait below is the sales one. An intake-only vacancy has its own
+    # requirements and a human reads the card, so it goes straight through.
+    profile = _ACCEPTED if not route.screen_enabled else profile_evaluate(
+        full_name=full_name,
+        region=None,  # not in response payload; AI will ask on call
+        desired_position=resp.text or resp.cover,
+        last_position=None,
+        resume_text=(resp.text or "") + " " + (resp.cover or ""),
+        birth_year=birth_year,
+    )
+    if not profile.accepted:
+        stats.profile_rejected += 1
+        log.info("workua.profile_rejected", id=resp.id, reason=profile.reason)
+        return
+
+    # Employer-cabinet link to this applicant's resume (FREE — no paid contact
+    # opening). Format confirmed 2026-07-22: /employer/my/applicants/{candidate_id}/.
+    # Never emit a dangling "?jobId=" — a response that came back without a
+    # job_id used to produce exactly that, and the link then opens nothing.
+    # The applicant page works on its own; the query only preselects the job.
+    applicant_url = None
+    if resp.candidate_id:
+        applicant_url = (
+            f"https://www.work.ua/employer/my/applicants/{resp.candidate_id}/"
+        )
+        if resp.job_id:
+            applicant_url += f"?jobId={resp.job_id}"
+    result = await router.ingest(
+        IngestPayload(
+            full_name=full_name,
+            phone_raw=resp.phone,
+            email=resp.email,
+            region_raw=None,
+            desired_position=None,
+            work_ua_url=applicant_url,
+            workua_response_id=str(resp.id),
+            resume_text=((resp.text or "") + (("\n\n" + resp.cover) if resp.cover else "")).strip() or None,
+            source=f"workua_response_{resp.from_type}",
+            vacancy_id=vacancies.LOCAL_FK,  # local FK; work.ua job_id lives in raw payload
+            vacancy_key=route.key,
+        )
+    )
+    if not result.accepted:
+        stats.rejected += 1
+    elif result.duplicate:
+        stats.duplicates += 1
+    else:
+        stats.accepted += 1
+
+
+async def catch_up_skipped(
+    *,
+    client: WorkUaClient,
+    router: InboundRouter,
+    cursor: dict[str, Any],
+    page_size: int = 50,
+    max_pages: int = 40,
+) -> int:
+    """Replay the responses skipped while their posting was still unmapped.
+
+    Runs by itself at the top of every poll. A republished vacancy always
+    arrives as an unknown id first, so the applicants behind it are skipped
+    before anyone can know they mattered; once the id is added in the panel this
+    pulls them back with no cursor surgery and nobody having to spot a warning
+    line. Bounded by `max_pages` so one very old ledger entry cannot hold up the
+    live poll — whatever it does not reach this run it reaches on the next.
+
+    Idempotent: the router dedupes by phone, so a replay that overlaps work
+    already done costs lookups, not duplicate cards.
+    """
+    due = _due_catch_ups(cursor)
+    if not due:
+        return 0
+
+    stop_at = int(cursor.get("responses_last_id") or 0)
+    replayed = 0
+    for job_id, resume_from in due:
+        stats = PollStats()
+        # Per job, not cumulative: this line is the receipt somebody reads to
+        # decide whether a panel edit worked, so it has to say what THIS posting
+        # gave back.
+        for_this_job = 0
+        last = resume_from
+        pages = 0
+        while pages < max_pages:
+            page = await client.list_responses(
+                limit=page_size, last_id=last, sort=1, from_types=["send", "phonecall"]
+            )
+            items = page.get("items") or []
+            if not items:
+                break
+            pages += 1
+            for raw in items:
+                try:
+                    resp = parse_response(raw)
+                except Exception as e:
+                    log.warning(
+                        "workua.catch_up.parse_failed", error=str(e), raw_id=raw.get("id")
+                    )
+                    continue
+                last = max(last, resp.id)
+                if resp.job_id != job_id:
+                    continue
+                for_this_job += 1
+                await _ingest_response(resp, router=router, stats=stats)
+            if last >= stop_at:
+                break
+        (cursor.get(SKIPPED_LEDGER_KEY) or {}).pop(str(job_id), None)
+        # WARNING because it is the receipt for a silent loss being undone —
+        # this line is how you find out the panel edit actually took effect.
+        replayed += for_this_job
+        log.warning(
+            "workua.catch_up.done",
+            job_id=job_id,
+            replayed=for_this_job,
+            accepted=stats.accepted,
+            duplicates=stats.duplicates,
+            rejected=stats.rejected,
+            profile_rejected=stats.profile_rejected,
+        )
+    return replayed
+
+
 async def poll_responses(
     *,
     client: WorkUaClient | None = None,
@@ -115,9 +295,9 @@ async def poll_responses(
 ) -> PollStats:
     """Pull new responses since last_id and feed them through InboundRouter.
 
-    Filters by WORKUA_ALLOWED_VACANCY_IDS (csv of job_ids) — responses to any
-    other vacancy (e.g. the client's bookkeeper posting) are skipped so the
-    inbound funnel stays scoped to the target role.
+    Routes by `job_id` through the vacancy registry. A response to a posting the
+    registry does not know is skipped — but recorded, and replayed automatically
+    once someone maps that id (see `catch_up_skipped`).
 
     Idempotent: re-running with the same last_id is safe; router dedupes by phone.
     """
@@ -128,16 +308,24 @@ async def poll_responses(
     last_id: int | None = cursor.get("responses_last_id")
     allowed_vacancies = _allowed_vacancy_ids()
 
+    # Before anything new: give back whatever a newly-mapped vacancy lost.
+    try:
+        if await catch_up_skipped(client=client, router=router, cursor=cursor):
+            _save_cursor(cursor)
+    except Exception as e:
+        # A failed replay must never cost us the live poll — the ledger entry
+        # survives, so the next tick tries again.
+        log.warning("workua.catch_up.failed", error=str(e))
+
     try:
         # Always the account-wide feed, then route by `job_id` below.
         #
         # This used to call the per-vacancy endpoint once per allowed id. That
         # endpoint answers 404 for our postings, and the client turns 404 into an
         # empty page — so the poller reported new=0 with errors=0 and nobody
-        # noticed for weeks while the other integration pulled ~80 responses a
-        # day from the same account. Worse, work.ua issues a NEW job id when a
-        # posting is republished, so a hardcoded id list goes stale silently by
-        # design.
+        # noticed for weeks while the other integration pulled from the same
+        # account. Worse, work.ua issues a NEW job id when a posting is
+        # republished, so a hardcoded id list goes stale silently by design.
         types = ["send", "phonecall"] if include_phonecalls else ["send"]
         page = await client.list_responses(
             limit=page_size, last_id=last_id, sort=1, from_types=types
@@ -159,6 +347,7 @@ async def poll_responses(
     stats.new_responses = len(items)
     if not items:
         log.info("workua.poll.no_new")
+        _save_cursor(cursor)
         return stats
 
     # Responses to postings we do not know about. Counted and reported once per
@@ -175,84 +364,25 @@ async def poll_responses(
             stats.errors += 1
             continue
 
-        if resp.id > max_seen_id:
-            max_seen_id = resp.id
+        max_seen_id = max(max_seen_id, resp.id)
 
         if allowed_vacancies and resp.job_id not in allowed_vacancies:
             stats.rejected += 1
             unknown_jobs[resp.job_id] += 1
+            # Remembered, not just counted: mapping the id later is enough to
+            # get these people back.
+            _record_skipped(cursor, job_id=resp.job_id, response_id=resp.id)
             continue
 
-        if not resp.phone:
-            stats.rejected += 1
-            continue
-
-        route = vacancies.for_workua(resp.job_id) or vacancies.DEFAULT
-        full_name = resp.fio or "Кандидат work.ua"
-        # Quick profile filter — region/age via from_type isn't available here yet,
-        # but birth_date is.
-        birth_year = None
-        if resp.birth_date and len(resp.birth_date) >= 4:
-            try:
-                birth_year = int(resp.birth_date[:4])
-            except ValueError:
-                birth_year = None
-
-        # The portrait below is the sales one. An intake-only vacancy has its own
-        # requirements and a human reads the card, so it goes straight through.
-        profile = _ACCEPTED if not route.screen_enabled else profile_evaluate(
-            full_name=full_name,
-            region=None,  # not in response payload; AI will ask on call
-            desired_position=resp.text or resp.cover,
-            last_position=None,
-            resume_text=(resp.text or "") + " " + (resp.cover or ""),
-            birth_year=birth_year,
-        )
-        if not profile.accepted:
-            stats.profile_rejected += 1
-            log.info("workua.profile_rejected", id=resp.id, reason=profile.reason)
-            continue
-
-        # Employer-cabinet link to this applicant's resume (FREE — no paid contact
-        # opening). Format confirmed 2026-07-22: /employer/my/applicants/{candidate_id}/.
-        # Never emit a dangling "?jobId=" — a response that came back without a
-        # job_id used to produce exactly that, and the link then opens nothing.
-        # The applicant page works on its own; the query only preselects the job.
-        applicant_url = None
-        if resp.candidate_id:
-            applicant_url = (
-                f"https://www.work.ua/employer/my/applicants/{resp.candidate_id}/"
-            )
-            if resp.job_id:
-                applicant_url += f"?jobId={resp.job_id}"
-        result = await router.ingest(
-            IngestPayload(
-                full_name=full_name,
-                phone_raw=resp.phone,
-                email=resp.email,
-                region_raw=None,
-                desired_position=None,
-                work_ua_url=applicant_url,
-                workua_response_id=str(resp.id),
-                resume_text=((resp.text or "") + (("\n\n" + resp.cover) if resp.cover else "")).strip() or None,
-                source=f"workua_response_{resp.from_type}",
-                vacancy_id=vacancies.LOCAL_FK,  # local FK; work.ua job_id lives in raw payload
-                vacancy_key=route.key,
-            )
-        )
-        if not result.accepted:
-            stats.rejected += 1
-        elif result.duplicate:
-            stats.duplicates += 1
-        else:
-            stats.accepted += 1
+        await _ingest_response(resp, router=router, stats=stats)
 
     stats.last_id = max_seen_id
     cursor["responses_last_id"] = max_seen_id
     if unknown_jobs:
         # WARNING, not info: this is the signal that a posting was republished
         # under a new id and its applicants are going nowhere. Map it in the
-        # vacancy registry (панель → Параметри вакансії → Збір і обдзвін).
+        # vacancy registry (панель → Параметри вакансії → Збір і обдзвін) and
+        # the next poll replays them on its own.
         log.warning(
             "workua.unknown_vacancies",
             jobs=dict(unknown_jobs.most_common()),
