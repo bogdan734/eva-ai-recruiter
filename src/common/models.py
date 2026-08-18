@@ -68,7 +68,7 @@ class Candidate(Base):
     languages: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     work_ua_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     resume_text: Mapped[str | None] = mapped_column(Text, nullable=True)
-    source: Mapped[str] = mapped_column(String(32), default="manual")
+    source: Mapped[str] = mapped_column(String(128), default="manual")
     match_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[CandidateStatus] = mapped_column(String(32), default=CandidateStatus.NEW_RESUME.value)
     vacancy_id: Mapped[int | None] = mapped_column(ForeignKey("vacancies.id"), nullable=True)

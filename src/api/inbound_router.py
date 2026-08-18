@@ -97,6 +97,30 @@ def _format_manager_comment(payload: IngestPayload, region: str | None) -> str:
     return " | ".join(bits)
 
 
+# Width of `candidates.source`. Kept in sync with migration 0007 — the column
+# used to be VARCHAR(32), which a candidate who applied through two channels
+# already overflowed, killing the whole ingest transaction.
+SOURCE_MAX_LEN = 128
+
+
+def merge_sources(existing: str | None, new: str | None, *, limit: int = SOURCE_MAX_LEN) -> str:
+    """Union of the channels a candidate reached us through, oldest tag first.
+
+    Compares whole tags, not substrings: the old `new not in existing` test read
+    a tag that happened to be a prefix of another as already recorded. When the
+    result would not fit, the newest tag is dropped whole — a tag cut in half is
+    worse than a tag missing, because the next merge would treat the fragment as
+    a channel of its own.
+    """
+    tokens: list[str] = [t for t in (existing or "").split(",") if t]
+    for tag in (new or "").split(","):
+        if tag and tag not in tokens:
+            tokens.append(tag)
+    while tokens and len(",".join(tokens)) > limit:
+        tokens.pop()
+    return ",".join(tokens)
+
+
 class InboundRouter:
     def __init__(self, keycrm: CRMClient | None = None) -> None:
         self._keycrm = keycrm or get_crm()
@@ -147,8 +171,9 @@ class InboundRouter:
                 await session.execute(select(Candidate).where(Candidate.phone_e164 == phone))
             ).scalar_one_or_none()
             if existing:
-                if existing.source != payload.source and payload.source not in existing.source:
-                    existing.source = f"{existing.source},{payload.source}"
+                merged_source = merge_sources(existing.source, payload.source)
+                if merged_source != existing.source:
+                    existing.source = merged_source
                 # For a vacancy Єва works, a known phone means we are done — she
                 # is already handling this person. For an intake-only vacancy the
                 # card lives in a DIFFERENT funnel worked by a different person,
