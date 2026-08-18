@@ -14,6 +14,7 @@ new in this migration.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -128,30 +129,19 @@ async def poll_responses(
     allowed_vacancies = _allowed_vacancy_ids()
 
     try:
-        if allowed_vacancies:
-            # Per-vacancy endpoint returns only Відгуки for the given job — no
-            # noise from historical vacancies. Merge results across allowed IDs.
-            merged: list[dict] = []
-            for vid in sorted(allowed_vacancies):
-                try:
-                    r = await client.list_responses_for_vacancy(
-                        vid, limit=page_size, last_id=last_id
-                    )
-                    for item in (r.get("items") or []):
-                        # The per-vacancy endpoint may omit job_id (it is implied
-                        # by the URL). Stamp it so routing downstream knows which
-                        # vacancy — and therefore which funnel — this belongs to.
-                        item.setdefault("job_id", vid)
-                        merged.append(item)
-                except (WorkUaApiError, WorkUaAuthError) as e:
-                    log.warning("workua.vacancy_fetch_failed", vid=vid, error=str(e))
-                    stats.errors += 1
-            page = {"items": merged}
-        else:
-            types = ["send", "phonecall"] if include_phonecalls else ["send"]
-            page = await client.list_responses(
-                limit=page_size, last_id=last_id, sort=1, from_types=types
-            )
+        # Always the account-wide feed, then route by `job_id` below.
+        #
+        # This used to call the per-vacancy endpoint once per allowed id. That
+        # endpoint answers 404 for our postings, and the client turns 404 into an
+        # empty page — so the poller reported new=0 with errors=0 and nobody
+        # noticed for weeks while the other integration pulled ~80 responses a
+        # day from the same account. Worse, work.ua issues a NEW job id when a
+        # posting is republished, so a hardcoded id list goes stale silently by
+        # design.
+        types = ["send", "phonecall"] if include_phonecalls else ["send"]
+        page = await client.list_responses(
+            limit=page_size, last_id=last_id, sort=1, from_types=types
+        )
     except WorkUaAuthError as e:
         log.error("workua.auth_error", error=str(e))
         stats.errors += 1
@@ -171,6 +161,11 @@ async def poll_responses(
         log.info("workua.poll.no_new")
         return stats
 
+    # Responses to postings we do not know about. Counted and reported once per
+    # poll instead of one info line each: a republished vacancy shows up here
+    # as a live id nobody has mapped yet, which is exactly how 74% of the
+    # work.ua flow went unnoticed.
+    unknown_jobs: Counter = Counter()
     max_seen_id = last_id or 0
     for raw in items:
         try:
@@ -185,12 +180,7 @@ async def poll_responses(
 
         if allowed_vacancies and resp.job_id not in allowed_vacancies:
             stats.rejected += 1
-            log.info(
-                "workua.vacancy_filtered",
-                id=resp.id,
-                job_id=resp.job_id,
-                allowed=sorted(allowed_vacancies),
-            )
+            unknown_jobs[resp.job_id] += 1
             continue
 
         if not resp.phone:
@@ -259,6 +249,15 @@ async def poll_responses(
 
     stats.last_id = max_seen_id
     cursor["responses_last_id"] = max_seen_id
+    if unknown_jobs:
+        # WARNING, not info: this is the signal that a posting was republished
+        # under a new id and its applicants are going nowhere. Map it in the
+        # vacancy registry (панель → Параметри вакансії → Збір і обдзвін).
+        log.warning(
+            "workua.unknown_vacancies",
+            jobs=dict(unknown_jobs.most_common()),
+            skipped=sum(unknown_jobs.values()),
+        )
     _save_cursor(cursor)
     log.info("workua.poll.done", **{k: getattr(stats, k) for k in stats.__dataclass_fields__})
     return stats
