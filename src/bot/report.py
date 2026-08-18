@@ -61,6 +61,7 @@ class DayReport:
     funnel_unreachable: int = 0
     qualified_names: list[str] = field(default_factory=list)
     robotaua_block: str = ""
+    workua_postings_block: str = ""
     balances_block: str = ""
 
 
@@ -199,10 +200,24 @@ async def collect_for(target: date) -> DayReport:
     }
     rep.cost["total"] = round(sum(rep.cost.values()), 2)
     rep.robotaua_block = _robotaua_report_block()
+    rep.workua_postings_block = _workua_postings_block()
     rep.balances_block = await _balances_block()
 
     rep.tg_sent_today, rep.tg_limit, rep.tg_active = await _tg_stats()
     return rep
+
+
+def _workua_postings_block() -> str:
+    """Whether work.ua still carries the postings we recruit for.
+
+    Reads the liveness poller's snapshot — no request of its own. Prints nothing
+    while every posting is up, so the day it appears it means something.
+    """
+    try:
+        from src.integrations.workua_liveness import report_block
+        return report_block()
+    except Exception:
+        return ""
 
 
 def _robotaua_report_block() -> str:
@@ -309,6 +324,7 @@ def format_report_md(rep: DayReport) -> str:
         f"📥 *Нові кандидати: {total_intake}*\n"
         f"{intake_lines}\n"
         f"{rep.robotaua_block}"
+        f"{rep.workua_postings_block}"
         f"\n"
         f"💰 *Витрати*\n"
         f"├ Vapi (дзвінки, {rep.total_in_line_sec // 60} хв): ${c.get('vapi', 0):.2f}\n"

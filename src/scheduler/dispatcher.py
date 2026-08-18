@@ -329,6 +329,20 @@ async def reconcile_unfinalized() -> None:
     if fixed:
         log.info("reconcile.done fixed=%d of=%d", fixed, len(rows))
 
+async def check_workua_vacancy_liveness() -> None:
+    """Twice a day: is each posting we recruit for still published?
+
+    The poller cannot answer this. A deleted posting sends nothing, so
+    `new=0 errors=0` reads identically to a quiet day — which is how both sales
+    postings stayed dead for five days while the call queue starved.
+    """
+    try:
+        from src.integrations.workua_liveness import run
+        await run()
+    except Exception as e:  # noqa: BLE001
+        log.error("workua.liveness failed: %s", e)
+
+
 async def poll_workua_responses() -> None:
     """work.ua API inbound poller — runs every 5 min."""
     from src.bot.admin import workua_paused
@@ -419,6 +433,21 @@ def build_scheduler() -> AsyncIOScheduler:
         trigger=CronTrigger(minute="*/5", timezone=s.app_timezone),
         id="workua_poll",
         replace_existing=True,
+    )
+    # Is anything we recruit for still actually published? Two public page hits
+    # per posting per day — far under WORKUA_SCRAPE_DAILY_LIMIT, and the only
+    # way a deletion can reach us at all.
+    scheduler.add_job(
+        check_workua_vacancy_liveness,
+        trigger=CronTrigger(
+            hour=os.environ.get("WORKUA_LIVENESS_CRON_HOUR", "9,17"),
+            minute=11,
+            timezone=s.app_timezone,
+        ),
+        id="workua_vacancy_liveness",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
     )
     # Poll robota.ua responses — offset from the work.ua poller so the two
     # inbound sources never hammer the intake in the same second.
