@@ -297,18 +297,34 @@ ROLE_MARKERS = ("логіст", "продаж", "менеджер", "sales", "lo
 def worth_opening(apply: dict, region: str | None) -> bool:
     """Is this parked apply worth one of the account's paid contact openings?
 
-    Only if the funnel could actually take them: the region is on the whitelist
-    and the desired position looks like sales/logistics. Otherwise the intake
-    would reject them seconds later and the opening is burnt for nothing — which
-    is exactly what a first pass over the 49 parked applies showed (44 of them
-    sit in oblasts the geo filter blocks).
+    The per-vacancy switch is the veto: `open_paid_contacts` off means never,
+    whatever else is true.
 
-    Intake-only vacancies never spend quota: nobody is going to call those
-    applicants, so paying to reveal a number buys nothing.
+    Past that, the question splits by what happens to the person next.
+
+    For a vacancy Eva dials, an opening only pays off if the intake would keep
+    them, so the sales guards stand: whitelisted oblast, sales/logistics title.
+    A first pass over the 49 parked applies found 44 sitting in oblasts the geo
+    filter blocks — every one of those would have been an opening burnt to reveal
+    a number nobody was allowed to call.
+
+    For an intake-only vacancy neither guard applies. Both are shaped for the
+    sales portrait, and such a vacancy has its own geo and its own requirements
+    with a human reading the card. Worse, robota.ua sends most records as
+    `Interaction`, which carries no speciality and no phone — so the title test
+    refuses nearly all of them and the vacancy produces almost no cards at all.
+    That is the state the client wrote in about: applicants plainly visible in
+    the robota.ua cabinet and absent from the CRM.
+
+    Openings are prepaid and expire on a date whether or not they are spent, so
+    for a vacancy a recruiter works by hand the useful question is only whether
+    the vacancy wants them opened.
     """
     route = vacancies.for_robotaua(apply.get("vacancyId"))
     if route is not None and not route.open_paid_contacts:
         return False
+    if route is not None and not route.screen_enabled:
+        return True
     if not region:
         return False
     s = get_settings()
