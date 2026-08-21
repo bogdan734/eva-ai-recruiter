@@ -40,15 +40,18 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 import structlog
 
-from src.api.inbound_router import IngestPayload, InboundRouter
+from src.api.inbound_router import InboundRouter, IngestPayload
+from src.common import vacancies
 from src.common.regions import is_region_allowed, normalize_region
 from src.common.settings import get_settings
 from src.integrations.base import JobBoardProvider, PollResult
+from src.integrations.resume_file import phone_from_file
 from src.integrations.robotaua_api import (
     RobotaUaBlockedError,
     RobotaUaClient,
@@ -58,8 +61,6 @@ from src.integrations.robotaua_api import (
     state_dir,
     write_status,
 )
-from src.common import vacancies
-from src.integrations.resume_file import phone_from_file
 from src.match.profile_filter import FilterResult
 from src.match.profile_filter import evaluate as profile_evaluate
 
@@ -535,6 +536,11 @@ async def poll_responses(
     seen: set[int] = {int(x) for x in cursor.get("seen_ids") or []}
     pending: dict[str, dict] = dict(cursor.get("pending") or {})
     allowed = allowed_vacancy_ids()
+    # Applies to postings nobody has mapped. Counted per run and reported once,
+    # never dropped in silence: a republished vacancy arrives here as a live id
+    # that matches nothing, and on work.ua exactly that carried 74% of the flow
+    # into a bare `continue` for weeks.
+    unknown_vacancies: Counter = Counter()
     backfill_days = _env_int("ROBOTAUA_BACKFILL_DAYS", 3)
     max_pages = _env_int("ROBOTAUA_MAX_PAGES", 4)
 
@@ -572,6 +578,7 @@ async def poll_responses(
                 if int(apply_id) in seen:
                     continue
                 if allowed and apply.get("vacancyId") not in allowed:
+                    unknown_vacancies[apply.get("vacancyId")] += 1
                     continue
                 fresh.append(apply)
             if reached_old:
@@ -587,6 +594,16 @@ async def poll_responses(
         stats.errors += 1
         log.error("robotaua.list_failed", error=str(e))
         return stats
+
+    if unknown_vacancies:
+        # WARNING, not info: this is the signal that a posting was republished
+        # under a new id and its applicants are going nowhere. Map it in the
+        # panel (Параметри вакансії → вакансія → Збір і обдзвін).
+        log.warning(
+            "robotaua.unknown_vacancies",
+            vacancies=dict(unknown_vacancies),
+            skipped=sum(unknown_vacancies.values()),
+        )
 
     max_cv = _env_int("ROBOTAUA_MAX_CV_FETCH", MAX_CV_FETCH_DEFAULT)
     cv_budget = max_cv
