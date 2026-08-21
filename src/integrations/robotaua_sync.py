@@ -293,6 +293,53 @@ async def _ingest_one(
 
 ROLE_MARKERS = ("логіст", "продаж", "менеджер", "sales", "logistic", "експедит", "закупів")
 
+# Score for a vacancy whose role nobody has described. Sits above the threshold
+# on purpose: "we cannot judge" must not read as "reject".
+NEUTRAL_FIT = 50
+MIN_FIT_DEFAULT = 50
+
+
+def fit_score(apply: dict, route) -> int:
+    """0–100: how well this record fits the vacancy, judged without paying.
+
+    Openings are a fixed prepaid pool, so the choice of who to spend one on has
+    to be made from what robota.ua gives away for free. That rules out the CV
+    body and the phone; what is left is the desired speciality, the work
+    history, robota.ua's own match flag and how complete the CV is. All four
+    survive on an `Interaction` record, which is most of the traffic.
+
+    A vacancy with no `role_markers` scores neutral rather than zero. Nobody has
+    described that role yet, and a silent zero would quietly stop it collecting
+    anyone — the failure mode this project keeps relearning.
+    """
+    markers = tuple(getattr(route, "role_markers", ()) or ())
+    if not markers:
+        return NEUTRAL_FIT
+
+    def _hits(text: str) -> bool:
+        low = (text or "").lower()
+        return any(m in low for m in markers)
+
+    score = 0
+    # Wanting the job is worth more than having done it: the speciality is what
+    # the person is looking for now, the history is where they have been.
+    if _hits(apply.get("speciality") or ""):
+        score += 55
+    elif any(_hits(e.get("position") or "") for e in (apply.get("experiences") or [])):
+        score += 30
+
+    if apply.get("isMatchVacancy"):
+        score += 15
+
+    # Completeness only ever breaks a tie. A fully filled CV for the wrong job is
+    # still the wrong job, so this alone can never reach the threshold.
+    try:
+        score += int(round(min(100, max(0, int(apply.get("summaryPercentage") or 0))) * 0.2))
+    except (TypeError, ValueError):
+        pass
+
+    return max(0, min(100, score))
+
 
 def worth_opening(apply: dict, region: str | None) -> bool:
     """Is this parked apply worth one of the account's paid contact openings?
@@ -324,7 +371,10 @@ def worth_opening(apply: dict, region: str | None) -> bool:
     if route is not None and not route.open_paid_contacts:
         return False
     if route is not None and not route.screen_enabled:
-        return True
+        # Nobody dials these, so the sales guards below say nothing useful. What
+        # does matter is not burning a limited pool on people the recruiter
+        # would not look at twice.
+        return fit_score(apply, route) >= _env_int("ROBOTAUA_MIN_FIT", MIN_FIT_DEFAULT)
     if not region:
         return False
     s = get_settings()

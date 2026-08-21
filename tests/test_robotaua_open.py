@@ -39,13 +39,26 @@ class TestIntakeOnlyVacancy:
         # "бухгалтер" is in none of the sales ROLE_MARKERS, and that is the point.
         assert worth_opening(_apply(1, "бухгалтер"), "Дніпропетровська") is True
 
-    def test_opens_even_with_no_speciality(self, monkeypatch):
-        """`Interaction` records often carry no speciality at all."""
+    def test_refuses_when_there_is_nothing_to_judge_by(self, monkeypatch):
+        """No title and no history means no opinion — and no opening.
+
+        Openings come from a fixed prepaid pool, so an unreadable record loses
+        to a legible one every time. 49 of the 175 parked records carry no
+        speciality; they stay visible in the robota.ua cabinet either way.
+        """
         vac = vacancies.all_vacancies()["accountant"]
         monkeypatch.setattr(
             vacancies, "for_robotaua", lambda _vid: _replace(vac, open_paid_contacts=True)
         )
-        assert worth_opening(_apply(1, ""), "Дніпропетровська") is True
+        assert worth_opening(_apply(1, ""), "Дніпропетровська") is False
+
+    def test_opens_an_on_role_applicant(self, monkeypatch):
+        """Geo is not asked of a vacancy nobody dials — the title carries it."""
+        vac = vacancies.all_vacancies()["accountant"]
+        monkeypatch.setattr(
+            vacancies, "for_robotaua", lambda _vid: _replace(vac, open_paid_contacts=True)
+        )
+        assert worth_opening(_apply(1, "Бухгалтер первинної документації"), None) is True
 
     def test_still_refuses_when_the_vacancy_says_no(self, monkeypatch):
         """The per-vacancy switch stays the veto — nothing here overrides it."""

@@ -40,6 +40,11 @@ class Vacancy:
     vacancy_number: str = ""      # KeyCRM «Номер вакансії» (LD_1002)
     vacancy_url: str = ""         # KeyCRM «Посилання на вакансію» (LD_1004)
     open_paid_contacts: bool = False  # may spend robota.ua paid contact openings
+    # Words that mark someone as plausibly right for this role, read off the free
+    # part of a robota.ua record before any contact is opened. Empty means
+    # "cannot judge": scoring then stays neutral rather than refusing everyone,
+    # so a vacancy nobody has described yet still collects people.
+    role_markers: tuple[str, ...] = ()
     # Do we create cards for this vacancy at all? Off means the pullers skip it
     # entirely — used when ANOTHER system already owns that funnel and our cards
     # would be duplicates. See ACCOUNTANT below.
@@ -74,6 +79,9 @@ SALES = Vacancy(
     vacancy_number="8249916",
     vacancy_url="https://www.work.ua/jobs/8249916/",
     open_paid_contacts=True,
+    role_markers=(
+        "логіст", "продаж", "менеджер", "sales", "logistic", "експедит", "закупів",
+    ),
 )
 
 # Office roles in Dnipro (Барикадна, 15А), full-time. Єва is deliberately NOT
@@ -111,6 +119,16 @@ ACCOUNTANT = Vacancy(
     vacancy_url="https://www.work.ua/jobs/8242731/",
     open_paid_contacts=False,
     intake_enabled=True,
+    # Both halves of «Помічник керівника/ бухгалтера». The bookkeeping words
+    # alone refused «Помічник керівника» — literally half the posting's own
+    # title, and one of the people the client pointed at when they asked why
+    # robota.ua applicants were missing.
+    role_markers=(
+        "бухгалтер", "облік", "обліков", "фінанс", "економіст",
+        "казначей", "первинн", "аудит", "податк", "1с",
+        "помічник керівника", "асистент", "офіс-менеджер",
+        "діловод", "документообіг", "оператор пк",
+    ),
 )
 
 # Shipped in code. The live registry is `all_vacancies()` — these are only the

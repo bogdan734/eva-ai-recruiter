@@ -62,6 +62,7 @@ OPS_FIELDS = (
     "screen_enabled",
     "intake_enabled",
     "open_paid_contacts",
+    "role_markers",
     "vacancy_url",
 )
 
@@ -75,12 +76,14 @@ OPS_LABELS = {
     "screen_enabled": "Фільтри (гео, вік)",
     "intake_enabled": "Збирати відгуки",
     "open_paid_contacts": "Платні контакти",
+    "role_markers": "Слова посади (кому відкривати контакт)",
     "vacancy_url": "Посилання",
 }
 
 BOOL_FIELDS = ("calls_enabled", "screen_enabled", "intake_enabled", "open_paid_contacts")
 INT_FIELDS = ("keycrm_pipeline_id", "keycrm_status_id")
 IDSET_FIELDS = ("workua_ids", "robotaua_ids")
+WORDSET_FIELDS = ("role_markers",)
 
 
 class VacancyStoreError(ValueError):
@@ -145,6 +148,13 @@ def coerce(field: str, raw: str) -> Any:
                 )
             ids.append(int(p))
         return sorted(set(ids))
+    if field in WORDSET_FIELDS:
+        # Empty is a legitimate answer meaning "do not judge by title", which
+        # scores neutral rather than refusing everyone.
+        if not raw or raw in ("-", "—", "немає"):
+            return []
+        words = [w.strip().lower() for w in re.split(r"[,;]+", raw) if w.strip()]
+        return sorted(set(words))[:40]
     if field == "label":
         if not raw:
             raise VacancyStoreError("Назва не може бути порожньою.")
@@ -252,6 +262,8 @@ def apply(vacancy):
             patch[f] = v
         elif f in IDSET_FIELDS and isinstance(v, list):
             patch[f] = frozenset(int(x) for x in v)
+        elif f in WORDSET_FIELDS and isinstance(v, list):
+            patch[f] = tuple(str(x) for x in v)
         elif f in BOOL_FIELDS and isinstance(v, bool):
             patch[f] = v
         elif f in INT_FIELDS and isinstance(v, int):
