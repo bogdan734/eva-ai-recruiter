@@ -26,18 +26,19 @@ from datetime import datetime
 import structlog
 from sqlalchemy import select
 
-from src.common.db import session_scope
+from src.common import vacancies
 from src.common.crm import CRMClient, get_crm
+from src.common.db import session_scope
 from src.common.keycrm import (
     DEFAULT_MANAGER_ID,
     FUNNEL_ID,
     STATUS_NEW,
+    crm_source_id,
 )
 from src.common.models import Candidate, CandidateStatus
 from src.common.phone import normalize_phone
 from src.common.regions import is_region_allowed, normalize_region
 from src.common.settings import get_settings
-from src.common import vacancies
 from src.match.name_origin import is_slavic_name
 
 
@@ -324,6 +325,11 @@ class InboundRouter:
                 manager_comment=_format_manager_comment(payload, region),
                 pipeline_id=route.keycrm_pipeline_id or FUNNEL_ID,
                 status_id=route.keycrm_status_id or STATUS_NEW,
+                # Label the card with the board the person actually came from.
+                # Left unset it defaulted to work.ua for everyone, which is how
+                # robota.ua applicants became invisible to a recruiter filtering
+                # the funnel by source.
+                source_id=crm_source_id(payload.source),
                 manager_id=DEFAULT_MANAGER_ID,
                 # Intake-only cards must look like the sales funnel's: contact
                 # present but NOT saved as a client, so the recruiter chooses.

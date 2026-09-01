@@ -70,6 +70,40 @@ def _is_real_phone(phone: str | None) -> bool:
     return bool(phone) and phone.strip().startswith("+")
 
 
+
+# KeyCRM «Джерело» ids for this account, read off the cabinet on 2026-08-18 and
+# confirmed against card contents (a source_id=2 card carried a contact whose
+# e-mail was …@phone-registration.rabota.ua):
+#   1 work.ua · 2 rabota.ua · 3 Анкети · 4 Telegram
+#
+# 3 belongs to the other integration's channel and is never ours to claim.
+CRM_SOURCE_IDS = {
+    "workua": 1,
+    "robotaua": 2,
+    "telegram": 4,
+}
+DEFAULT_SOURCE_ID = 1
+
+
+def crm_source_id(source: str | None) -> int:
+    """Which «Джерело» this candidate's channel maps to.
+
+    Until 2026-09-01 nobody passed this at all, so every card we made — work.ua,
+    robota.ua, Telegram alike — was filed under work.ua, the default. A recruiter
+    filtering the funnel by robota.ua saw nothing and reported the leads missing.
+    They were there, wearing the wrong label.
+
+    `candidates.source` accumulates channels comma-joined as a person reappears,
+    so the first recognised token wins: a card is created once, at first contact,
+    and the origin is what the recruiter is filtering for.
+    """
+    for token in (source or "").split(","):
+        prefix = token.strip().lower().split("_")[0]
+        if prefix in CRM_SOURCE_IDS:
+            return CRM_SOURCE_IDS[prefix]
+    return DEFAULT_SOURCE_ID
+
+
 class KeyCRMClient:
     """Thin async wrapper over KeyCRM Open API v1."""
 
