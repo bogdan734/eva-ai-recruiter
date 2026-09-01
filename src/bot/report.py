@@ -277,6 +277,24 @@ async def _balances_block() -> str:
     return "\n".join(out) + "\n"
 
 
+
+def markdown_safe(text: str) -> str:
+    """Neutralise unpaired `_` and `*` so legacy Markdown cannot 400 the digest.
+
+    Telegram's legacy Markdown treats both as toggles. One stray `_` — the word
+    `job_id` was enough on 2026-08-22 — opens an italic that never closes, the
+    API answers 400 and the whole report is lost.
+
+    Deliberate emphasis is left alone: the digest is built from `*bold*` pairs
+    and escaping those would show the asterisks to the reader. Only an odd
+    count, which cannot be intentional formatting, gets escaped.
+    """
+    out = text
+    for marker in ("_", "*"):
+        if out.count(marker) % 2:
+            out = out.replace(marker, "\\" + marker)
+    return out
+
 def format_report_md(rep: DayReport) -> str:
     def pct(x: int) -> str:
         return f"{(x / rep.people_dialed * 100):.0f}%" if rep.people_dialed else "0%"

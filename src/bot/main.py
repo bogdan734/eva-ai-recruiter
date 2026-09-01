@@ -16,7 +16,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 from src.bot.admin import register_admin_handlers
 from src.bot.menu import register_menu_handlers, cmd_menu
-from src.bot.report import format_report_md, yesterdays_report
+from src.bot.report import format_report_md, markdown_safe, yesterdays_report
 from src.bot.report import collect_for as _collect_for_date
 from src.common.settings import get_settings
 
@@ -72,7 +72,7 @@ async def _send_daily(app: Application) -> None:
     if not recipients:
         log.warning("daily.skip", reason="no_recipients_configured")
         return
-    text = await yesterdays_report()
+    text = markdown_safe(await yesterdays_report())
     sent = 0
     for chat_id in recipients:
         try:
@@ -84,9 +84,25 @@ async def _send_daily(app: Application) -> None:
             )
             sent += 1
         except Exception as e:
-            # One blocked chat must not stop the digest for everyone else.
-            log.warning("daily.send_failed", chat=chat_id, error=str(e))
-    log.info("daily.sent", recipients=sent, of=len(recipients))
+            # Formatting must never cost the message. An unreadable digest beats
+            # a missing one, so a parse failure is retried as plain text — that
+            # is what silently swallowed the 09:00 report on 2026-08-22.
+            try:
+                await app.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    disable_web_page_preview=True,
+                )
+                sent += 1
+                # %-style, not kwargs: this is a stdlib logger, and calling it
+                # like structlog raised TypeError inside the error handler —
+                # which is how one bad character took down the whole job.
+                log.warning("daily.sent_plain chat=%s reason=%s", chat_id, e)
+                continue
+            except Exception as e2:
+                # One blocked chat must not stop the digest for everyone else.
+                log.warning("daily.send_failed chat=%s error=%s", chat_id, e2)
+    log.info("daily.sent recipients=%s of=%s", sent, len(recipients))
 
 
 def build_app() -> Application:
