@@ -284,43 +284,32 @@ class InboundRouter:
                 reason="deferred_until_qualified",
             )
 
-        # Eager mode — original behaviour.
+        # Eager mode.
         #
-        # Intake-only vacancies deliberately do NOT ask KeyCRM here. Their
-        # duplicate check is the card_pipeline() lookup above, which is
-        # authoritative; this endpoint cannot answer a phone question at all
-        # (HTTP 400 — see find_lead_by_phone), so calling it would only ever
-        # raise and, combined with failing closed, block every single card.
-        remote = None
-        if route.calls_enabled:
-            try:
-                remote = await self._keycrm.find_lead_by_phone(phone)
-            except Exception as e:
-                # FAIL CLOSED. This used to swallow the error and carry on with
-                # remote=None — "no duplicate found" — so a rate-limited or
-                # broken lookup produced another card for the same person on
-                # every poll. Skipping costs a cycle; guessing costs cleanup.
-                log.error(
-                    "keycrm.dedup_failed_skipping", error=str(e), phone=phone[:6] + "***"
-                )
-                return IngestResult(
-                    accepted=False,
-                    candidate_id=new_candidate_id,
-                    reason=f"dedup_unavailable:{type(e).__name__}",
-                )
+        # No branch asks KeyCRM for a phone duplicate here anymore. The only
+        # endpoint that could answer that — /pipelines/cards?filter[contact.phone]
+        # — rejects the filter outright:
+        #
+        #   HTTP 400 — Requested filter(s) `contact.phone` are not allowed.
+        #   Allowed filter(s) are `pipeline_id, status_id, source_id,
+        #   created_between, updated_between`.
+        #
+        # Verified 2026-08-05, reconfirmed live 2026-09-02 (also tried
+        # `client_id` / `buyer_id` — both 400 for the same reason). KeyCRM's
+        # buyer/contact search (`find_buyer_by_phone`, /buyer?filter[buyer_phone])
+        # does work, but cards cannot be filtered by buyer/client id either, so
+        # there is no supported path from "phone" to "does a card exist" on
+        # KeyCRM's side. Calling find_lead_by_phone here only ever raised and,
+        # combined with fail-closed error handling, silently blocked every
+        # single card the moment eager mode ran for a calls-enabled vacancy
+        # (e.g. DEFER_KEYCRM_UNTIL_QUALIFIED=0) — the same failure mode the
+        # intake-only branch was already exempted from, just never closed here.
+        #
+        # The local dedup above (candidates.phone_e164, unique) is the only
+        # duplicate signal that ever worked and is already authoritative;
+        # find_lead_by_phone is kept only as documentation and must not be
+        # called from live code — see its docstring in src/common/keycrm.py.
 
-        if remote:
-            async with session_scope() as session:
-                cand_db = await session.get(Candidate, new_candidate_id)
-                if cand_db and not cand_db.keycrm_lead_id:
-                    cand_db.keycrm_lead_id = int(remote.get("id") or 0)
-            return IngestResult(
-                accepted=True,
-                duplicate=True,
-                candidate_id=new_candidate_id,
-                keycrm_lead_id=int(remote.get("id") or 0),
-                reason="remote_duplicate",
-            )
 
         try:
             _vac_number, _vac_url = vacancy_number_and_url(

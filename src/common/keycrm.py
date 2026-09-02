@@ -158,7 +158,14 @@ class KeyCRMClient:
             Allowed filter(s) are `pipeline_id, status_id, source_id,
             created_between, updated_between`.
 
-        Verified 2026-08-05. Every call raises, so any caller that treats a failed
+        Verified 2026-08-05, reconfirmed live 2026-09-02 (also tried `client_id`
+        and `buyer_id` on /pipelines/cards — both 400 for the same reason; KeyCRM's
+        buyer search DOES support phone via /buyer?filter[buyer_phone], but a buyer
+        cannot be turned back into "does this person have a card" either, since cards
+        can't be filtered by buyer/client id). 2026-09-02: removed the last live
+        caller (inbound_router.py eager-mode branch) — it was failing closed on
+        every calls-enabled candidate whenever eager mode ran. Nothing should call
+        this anymore. Every call raises, so any caller that treats a failed
         lookup as "no duplicate found" will happily create duplicates forever —
         which is exactly what happened to the accountant funnel that day.
 
