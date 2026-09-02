@@ -6,12 +6,12 @@ backups/
 data/
 debug-*/
 .env
+HANDOFF_*.md
 *.log
 *.pyc
 __pycache__/
+recordings/
 state/
 tg_userbot/data/
 _trash_*/
-
 # Внутрішні робочі документи — не для репозиторію
-HANDOFF_*.md
