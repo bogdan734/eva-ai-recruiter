@@ -1,15 +1,14 @@
-.env
-.env.*
-*.bak-*
-*.bak
-__pycache__/
-*.pyc
-state/
-data/
-_trash_*/
-debug-*/
-*.log
-tg_userbot/data/
 
-.cache/
 _archive/
+backups/
+*.bak-*
+.cache/
+data/
+debug-*/
+.env
+*.log
+*.pyc
+__pycache__/
+state/
+tg_userbot/data/
+_trash_*/

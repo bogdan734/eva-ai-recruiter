@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import UTC, date, timedelta
 
 from sqlalchemy import func, select
 
-from src.common.db import session_scope
-from src.common.models import Call, CallStatus, Candidate, CandidateStatus
 from src.common import sources as _sources
+from src.common.db import session_scope
+from src.common.models import Call, Candidate, CandidateStatus
 from src.cost.pricing import PRICING
 
 # how a raw source string maps onto something a human wants to read
@@ -63,6 +63,7 @@ class DayReport:
     robotaua_block: str = ""
     workua_postings_block: str = ""
     balances_block: str = ""
+    backup_block: str = ""
 
 
 def _fmt_duration(seconds: int) -> str:
@@ -201,6 +202,7 @@ async def collect_for(target: date) -> DayReport:
     rep.cost["total"] = round(sum(rep.cost.values()), 2)
     rep.robotaua_block = _robotaua_report_block()
     rep.workua_postings_block = _workua_postings_block()
+    rep.backup_block = _backup_block()
     rep.balances_block = await _balances_block()
 
     rep.tg_sent_today, rep.tg_limit, rep.tg_active = await _tg_stats()
@@ -252,11 +254,51 @@ def _robotaua_report_block() -> str:
     return "\n".join(lines) + "\n"
 
 
+def _backup_block() -> str:
+    """Whether last night's dump actually happened.
+
+    A backup nobody checks is worse than none — it buys confidence it has not
+    earned. So this line is deliberately loud when the dump is missing or stale,
+    and quiet when it is fine. Silence here would repeat the mistake the whole
+    project keeps making: a counter at zero that nobody reads as a symptom.
+    """
+    import json
+    from datetime import datetime, timedelta
+
+    from src.common.state import state_dir
+
+    path = state_dir() / "backup_status.json"
+    if not path.exists():
+        return "\n💾 *Бекап бази*\n└ 🔴 не робився жодного разу\n"
+
+    try:
+        st = json.loads(path.read_text(encoding="utf-8"))
+        at = datetime.fromisoformat(str(st.get("at", "")).replace("Z", "+00:00"))
+    except Exception:
+        return "\n💾 *Бекап бази*\n└ 🔴 статус не читається\n"
+
+    age = datetime.now(UTC) - at
+    mb = (st.get("bytes") or 0) / 1_000_000
+    when = at.strftime("%d.%m %H:%M")
+
+    if not st.get("ok"):
+        why = str(st.get("error") or "")[:80]
+        return f"\n💾 *Бекап бази*\n└ 🔴 впав {when} UTC — {why}\n"
+    # Cron runs at 03:30; anything older than a day and a half means it stopped.
+    if age > timedelta(hours=36):
+        return (
+            f"\n💾 *Бекап бази*\n"
+            f"└ 🔴 останній {when} UTC — {int(age.total_seconds() // 3600)} год тому, крон стоїть\n"
+        )
+    return f"\n💾 *Бекап бази*\n└ {when} UTC, {mb:.1f} МБ\n"
+
+
 async def _balances_block() -> str:
     """What is left of the client's top-ups, at the current burn rate."""
     try:
         import json
         from pathlib import Path as _Path
+
         from src.cost.summary import balance_forecast
 
         state_path = _Path(os.getenv("STATE_PATH") or "/tmp/ai_recruiter_state.json")
@@ -348,6 +390,7 @@ def format_report_md(rep: DayReport) -> str:
         f"├ Vapi (дзвінки, {rep.total_in_line_sec // 60} хв): ${c.get('vapi', 0):.2f}\n"
         f"├ Anthropic (токени дзвінків): ${c.get('claude', 0):.2f}\n"
         f"└ *Разом: ${total:.2f}*  (${per_qualified:.2f} за кваліфікованого)\n"
+        f"{rep.backup_block}"
         f"{rep.balances_block}"
         f"\n"
         f"🎯 *Воронка зараз*\n"
