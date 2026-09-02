@@ -266,6 +266,7 @@ async def _ingest_one(
             source=SOURCE,
             vacancy_id=vacancies.LOCAL_FK,  # local FK; robota.ua id lives in the log
             vacancy_key=route.key,
+            board_vacancy_id=fields.get("vacancy_id"),
         )
     )
     if not result.accepted:
@@ -299,6 +300,11 @@ NEUTRAL_FIT = 50
 MIN_FIT_DEFAULT = 50
 
 
+# robota.ua record kinds that mean "this person applied", as opposed to
+# `Interaction`, which only means they looked or were recommended.
+APPLIED_TYPES = frozenset({"AttachedFile", "Notepad"})
+
+
 def fit_score(apply: dict, route) -> int:
     """0–100: how well this record fits the vacancy, judged without paying.
 
@@ -311,6 +317,12 @@ def fit_score(apply: dict, route) -> int:
     A vacancy with no `role_markers` scores neutral rather than zero. Nobody has
     described that role yet, and a silent zero would quietly stop it collecting
     anyone — the failure mode this project keeps relearning.
+
+    The record's kind matters more than any of that. `Interaction` is a view or
+    a recommendation; `AttachedFile` and `Notepad` are a person deliberately
+    answering the posting. Treating them alike produced the inversion the
+    recruiter reported on 02.09 — someone who only looked scored 70 and got a
+    card, someone who applied with a CV scored 15 and never reached the CRM.
     """
     markers = tuple(getattr(route, "role_markers", ()) or ())
     if not markers:
@@ -321,12 +333,26 @@ def fit_score(apply: dict, route) -> int:
         return any(m in low for m in markers)
 
     score = 0
+    # Answering the posting is the strongest thing robota.ua tells us for free.
+    # It is worth roughly what a matching speciality is worth, so a real
+    # application with a blank profile still clears the bar while an application
+    # for an unrelated role does not.
+    if str(apply.get("resumeType") or "") in APPLIED_TYPES:
+        score += 50
+
     # Wanting the job is worth more than having done it: the speciality is what
     # the person is looking for now, the history is where they have been.
-    if _hits(apply.get("speciality") or ""):
+    spec = (apply.get("speciality") or "").strip()
+    if _hits(spec):
         score += 55
     elif any(_hits(e.get("position") or "") for e in (apply.get("experiences") or [])):
         score += 30
+    elif spec:
+        # A speciality that names something else is evidence, not absence: this
+        # person is looking for a different job. An empty one is merely unknown
+        # and must not be punished — most `AttachedFile` records carry none, and
+        # penalising silence is how real applicants got filtered out.
+        score -= 20
 
     if apply.get("isMatchVacancy"):
         score += 15

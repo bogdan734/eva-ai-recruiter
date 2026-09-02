@@ -388,10 +388,53 @@ async def h_resolve(request):
         return web.json_response({"ok": False, "error": str(e)}, status=404)
 
 
+async def h_probe(request):
+    """Can this account resolve a phone at all? Answers without messaging anyone.
+
+    The recruiter reported that numbers she finds from her own account come back
+    "profile not found" from Eva's, and read that as Eva being restricted. The
+    two are different operations: a person is resolvable by phone only if their
+    privacy allows "who can find me by phone → everybody", and that limit applies
+    to every account equally. This imports the contact, reports what came back,
+    and deletes it again — no message, no trace in the candidate's chat list.
+    """
+    phone = (request.query.get("phone") or "").strip()
+    if not phone:
+        return web.json_response({"ok": False, "error": "no phone"}, status=400)
+    if not phone.startswith("+"):
+        phone = "+" + phone
+    entity, imported = None, False
+    try:
+        entity = await client.get_entity(phone)
+    except Exception:
+        entity = None
+    if entity is None:
+        try:
+            res = await client(ImportContactsRequest(contacts=[
+                InputPhoneContact(client_id=0, phone=phone, first_name="probe", last_name="")]))
+            if res.users:
+                entity, imported = res.users[0], True
+        except Exception as e:
+            return web.json_response({"ok": False, "phone": phone, "error": str(e)[:200]})
+    try:
+        if entity is None:
+            return web.json_response({"ok": False, "phone": phone,
+                                      "reason": "not_resolvable_by_phone"})
+        return web.json_response({"ok": True, "phone": phone, "id": entity.id,
+                                  "username": getattr(entity, "username", None)})
+    finally:
+        if imported and entity is not None:
+            try:
+                await client(DeleteContactsRequest(id=[entity]))
+            except Exception:
+                pass
+
+
 def build_web_app() -> web.Application:
     app = web.Application()
     app.add_routes([
         web.get("/health", h_health),
+        web.get("/probe", h_probe),
         web.get("/stats", h_stats),
         web.get("/resolve", h_resolve),
         web.post("/send", h_send),

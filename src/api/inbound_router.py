@@ -35,6 +35,7 @@ from src.common.keycrm import (
     STATUS_NEW,
     crm_source_id,
 )
+from src.common.vacancy_link import vacancy_number_and_url
 from src.common.models import Candidate, CandidateStatus
 from src.common.phone import normalize_phone
 from src.common.regions import is_region_allowed, normalize_region
@@ -70,6 +71,11 @@ class IngestPayload:
     # Which vacancy of `src.common.vacancies` the person applied to. Decides the
     # KeyCRM funnel, whether the screening filters run and whether Єва calls.
     vacancy_key: str = vacancies.DEFAULT.key
+    # The posting's own id on the board it arrived from — work.ua job_id or
+    # robota.ua vacancyId. A vacancy holds several of these (a republication is
+    # a new number for the same job), so the card can only point at the right
+    # one if the id travels with the applicant.
+    board_vacancy_id: int | None = None
 
 
 @dataclass
@@ -94,6 +100,10 @@ def _format_manager_comment(payload: IngestPayload, region: str | None) -> str:
         bits.append(f"AI match {int(payload.match_score * 100)}/100")
     if payload.source and payload.source != "manual":
         bits.append(f"джерело: {payload.source}")
+    # LD_1004 is «Посилання на вакансію» and now holds the posting, so the CV
+    # link moves here rather than being dropped — KeyCRM renders it clickable.
+    if payload.work_ua_url:
+        bits.append(f"резюме: {payload.work_ua_url}")
     bits.append(f"стара_дата: {datetime.utcnow().isoformat(timespec='seconds')}")
     return " | ".join(bits)
 
@@ -313,12 +323,17 @@ class InboundRouter:
             )
 
         try:
+            _vac_number, _vac_url = vacancy_number_and_url(
+                payload.source, payload.board_vacancy_id, route
+            )
             created = await self._keycrm.create_lead(
                 title=payload.full_name,
                 full_name=payload.full_name,
                 phone=phone,
                 email=payload.email,
                 vacancy_name=route.label or payload.vacancy_name,
+                vacancy_number=_vac_number,
+                vacancy_url=_vac_url,
                 workua_response_id=payload.workua_response_id,
                 resume_text=payload.resume_text,
                 resume_url=payload.work_ua_url,

@@ -203,6 +203,7 @@ async def _ingest_response(resp: Any, *, router: InboundRouter, stats: PollStats
             source=f"workua_response_{resp.from_type}",
             vacancy_id=vacancies.LOCAL_FK,  # local FK; work.ua job_id lives in raw payload
             vacancy_key=route.key,
+            board_vacancy_id=resp.job_id,
         )
     )
     if not result.accepted:

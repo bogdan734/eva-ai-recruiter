@@ -659,17 +659,22 @@ class CallOrchestrator:
                 talked_sec = int(row[1] or 0)
         if candidate:
             if summary.qualified:
-                # Talked and fits → handed to the recruiter → В роботі.
+                # Talked and fits — this is Eva's actual output, and «Відібрано»
+                # is where the recruiter looks for it. Until 02.09 it went to
+                # «В роботі» while half-finished calls went to «Відібрано», so
+                # one morning's selection was split across two stages and the
+                # recruiter had to sort both.
                 candidate.status = CandidateStatus.MANAGER_REVIEW
-                new_stage = STAGE_MAP.get("manager_review")   # 3 В роботі
+                new_stage = STAGE_MAP.get("call_done")        # 2 Відібрано
             elif (
                 getattr(summary, "potentially_fit", False)
                 and summary.spoke_with_candidate
             ):
                 # Talked, looks promising, but region/age not finished. Do not redial —
-                # finish it in Telegram. Stays in the Відібрано pool meanwhile.
+                # finish it in Telegram. Eva is still working this one, so it sits
+                # in «В роботі» rather than among the people she has settled on.
                 candidate.status = CandidateStatus.CALL_DONE
-                new_stage = STAGE_MAP.get("call_done")         # 2 Відібрано
+                new_stage = STAGE_MAP.get("manager_review")    # 3 В роботі
                 needs_tg_outreach = "collect_info"
             elif getattr(summary, "time_waster", False) or reason == "misbehaved":
                 # Rude / trolling / bad conduct → Не підходить нам.
@@ -694,7 +699,8 @@ class CallOrchestrator:
                 candidate.callback_at = _callback_moment(
                     summary, ZoneInfo(self._settings.app_timezone)
                 )
-                new_stage = STAGE_MAP.get("call_done")          # 2 Відібрано (пул)
+                # Promised a callback — unfinished, not selected.
+                new_stage = STAGE_MAP.get("manager_review")     # 3 В роботі
                 log.info(
                     "orchestrator.callback_scheduled",
                     candidate_id=candidate.id, at=str(candidate.callback_at),

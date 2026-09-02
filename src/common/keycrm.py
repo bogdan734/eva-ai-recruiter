@@ -332,6 +332,8 @@ class KeyCRMClient:
         phone: str,
         email: str | None = None,
         vacancy_name: str = "Менеджер з продажу",
+        vacancy_number: str = "",
+        vacancy_url: str = "",
         workua_response_id: str | None = None,
         resume_text: str | None = None,
         resume_url: str | None = None,
@@ -351,11 +353,19 @@ class KeyCRMClient:
         custom: list[dict[str, Any]] = []
         if vacancy_name:
             custom.append({"uuid": FIELD_VACANCY, "value": [vacancy_name]})
-        if workua_response_id:
+        # The posting the person answered. Both fields were empty on every
+        # robota.ua card until 2026-09-02 because nothing passed them.
+        if vacancy_number:
+            custom.append({"uuid": FIELD_RESPONSE_ID, "value": str(vacancy_number)})
+        elif workua_response_id:
             custom.append({"uuid": FIELD_RESPONSE_ID, "value": str(workua_response_id)})
         if resume_text:
             custom.append({"uuid": FIELD_RESUME_TEXT, "value": resume_text[:8000]})
-        if resume_url:
+        # LD_1004 is named «Посилання на вакансію», so that is what goes in it.
+        # The CV link the recruiter also wants moves into the note.
+        if vacancy_url:
+            custom.append({"uuid": FIELD_RESUME_URL, "value": vacancy_url})
+        elif resume_url:
             custom.append({"uuid": FIELD_RESUME_URL, "value": resume_url})
         if ai_audio_url:
             custom.append({"uuid": FIELD_AI_AUDIO, "value": ai_audio_url})
