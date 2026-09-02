@@ -12,3 +12,6 @@ __pycache__/
 state/
 tg_userbot/data/
 _trash_*/
+
+# Внутрішні робочі документи — не для репозиторію
+HANDOFF_*.md
