@@ -1,67 +1,111 @@
-# AI Recruiter — Phase 1
+# Єва — AI-рекрутер
 
-Voice AI HR pipeline: work.ua → KeyCRM → Ringostat/Vapi voice agent → daily Telegram report.
+Голосова помічниця рекрутера для «Козир Транс» (організація вантажоперевезень).
+Сама забирає відгуки з job-бордів, заводить картки в CRM, телефонує кандидатам,
+веде розмову українською, а результат кладе на потрібний етап воронки.
 
-## Stack
-- **Python 3.12** + FastAPI (REST API + webhooks)
-- **Playwright** (work.ua scraping)
-- **Apix-Drive** (work.ua inbound responses → KeyCRM)
-- **Claude Sonnet 4.6** (dialogue brain + embedding match + post-call summary)
-- **Deepgram Nova-3** (STT streaming, uk/ru/en)
-- **ElevenLabs Flash v2.5** (TTS, uk voice)
-- **Vapi.ai** (voice orchestration, WebSocket bridge, VAD, barge-in)
-- **Twilio / Ringostat** (telephony, +380 number)
-- **KeyCRM** (lead funnel, source of truth)
-- **python-telegram-bot** (separate daily report bot, 9:00 EET)
-- **NocoDB / SQLite** (call logs, cost tracking)
-- **Hetzner CX22 Helsinki** (VPS, low RTT to UA)
-- **Caddy** (reverse proxy, auto-HTTPS)
-- **sops + age** (encrypted secrets)
+У бою з 21.07.2026.
 
-## Project layout
+## Як це працює
+
 ```
-ai-recruiter/
-├── docs/                    # Specs, schemas, research notes
-├── src/
-│   ├── api/                 # FastAPI app, webhooks, REST
-│   ├── scheduler/           # Cron-based call dispatcher
-│   ├── scraper/             # work.ua Playwright scraper
-│   ├── bot/                 # Telegram daily report bot
-│   ├── call/                # Vapi orchestration glue
-│   ├── match/               # Embedding match (candidate ↔ vacancy)
-│   ├── guardrails/          # Profanity, repetition, exit detection
-│   ├── cost/                # Token/usage cost tracking
-│   └── common/              # Shared models, db, settings
-├── tests/
-├── deploy/                  # docker-compose, Caddyfile, systemd
-└── scripts/                 # one-off ops scripts
+work.ua ─┐
+         ├─► інтейк ─► фільтри ─► KeyCRM ─► черга обдзвону ─► Єва (Vapi) ─► етап у воронці
+robota.ua┘                                        │                              │
+                                                  └── Telegram-дописування ◄──────┘
 ```
 
-## Quick start (dev)
+1. **Інтейк.** Опитування API обох бордів за курсором. Відгук маршрутизується у
+   вакансію за id оголошення, звідти — воронка, етап, чи вмикати фільтри, чи
+   дзвонити взагалі.
+2. **Скринінг.** Гео, вік, портрет посади. Для вакансій, які веде людина,
+   фільтри вимикаються — картку читає рекрутер.
+3. **Дзвінок.** Vapi тримає лінію й голос, Claude веде діалог, підсумок і
+   рішення пишуться в картку.
+4. **Дописування.** Кого не додзвонились або з ким не договорили — Єва пише в
+   Telegram, у власному темпі й з антиспамом.
+5. **Звіт.** Щодня о 9:00 у Telegram: дзвінки, витрати, стан інтеграцій,
+   залишки коштів, бекап.
+
+## Стек
+
+| | |
+|---|---|
+| Мова | Python 3.12, FastAPI, APScheduler, SQLAlchemy |
+| Діалог | Claude Haiku 4.5 |
+| Голос | Vapi.ai — оркестрація дзвінка, STT і TTS усередині |
+| Телефонія | Stream Telecom, SIP-транк, український номер |
+| CRM | KeyCRM — воронки, картки, кастомні поля |
+| Джерела | work.ua API, robota.ua API |
+| Панель | Telegram-бот: вакансії, паузи, ліміти, звіти |
+| Дописування | Telegram-юзербот (Telethon) |
+| Дані | PostgreSQL |
+| Інфраструктура | Hetzner CPX22 Helsinki, Docker Compose, Caddy |
+
+⚠️ ElevenLabs і окремий Deepgram **скасовані** в липні 2026 — голос і
+розпізнавання йдуть через Vapi, його хвилина вже включає STT і TTS.
+
+## Структура
+
+```
+src/
+├── api/           # FastAPI, вебхуки Vapi, інтейк-роутер
+├── scheduler/     # диспетчер дзвінків і всі періодичні задачі
+├── integrations/  # work.ua, robota.ua, Telegram-розсилка
+├── call/          # оркестрація розмови, підсумки, етапи CRM
+├── bot/           # Telegram-панель і щоденний звіт
+├── match/         # портретний фільтр
+├── guardrails/    # захист від зривів розмови
+├── cost/          # облік токенів і хвилин
+└── common/        # моделі, БД, налаштування, реєстр вакансій, KeyCRM
+tg_userbot/        # окремий сервіс дописування в Telegram
+migrations/        # Alembic
+scripts/           # разові операції: бекап, догони, діагностика
+tests/
+deploy/            # docker-compose, Caddyfile
+```
+
+## Реєстр вакансій
+
+Вакансії живуть не в коді, а в реєстрі: дефолти в `src/common/vacancies.py`,
+правки — з Telegram-панелі, у файл на змонтованому томі. Змінюються без деплою:
+id оголошень на обох бордах, воронка й етап, вмикачі збору та обдзвону, слова
+посади для оцінки відповідності, репліки Єви про цю вакансію.
+
+⚠️ Борди **міняють id оголошення при перепублікації**. Незнайомий id не
+відкидається мовчки — він рахується і йде у звіт як `unknown_vacancies`, а
+пропущені відгуки добираються, щойно id заведуть.
+
+## Запуск
+
 ```bash
-cp .env.example .env       # fill in your keys
-docker compose up -d
-curl http://localhost:8000/health
+cp .env.example .env      # ключі, доступи, номери
+cd deploy && docker compose up -d
+docker compose exec api alembic upgrade head
 ```
 
-## Deploy
-See `deploy/README.md` (Hetzner CX22 + Caddy + docker-compose).
+Код вшивається в образ на build: після зміни `src/` потрібен
+`docker compose build <сервіс> && docker compose up -d <сервіс>`.
 
-## Status
-- [x] Repo skeleton
-- [x] KeyCRM schema spec
-- [x] Apix-Drive setup guide
-- [x] Ringostat architecture research
-- [x] Vapi config template
-- [x] Scraper prototype (public pages)
-- [x] Embedding match module
-- [x] Guardrails module
-- [x] Cost tracker
-- [x] TG bot skeleton
-- [x] Daily report aggregator
-- [ ] Call script v1 (waiting from client)
-- [ ] Infrastructure provisioned (waiting for credentials)
-- [ ] KeyCRM funnel + fields (waiting for API token)
-- [ ] Apix-Drive live (waiting for work.ua employer account)
-- [ ] Vapi assistant live (waiting for Twilio/Ringostat decision)
-- [ ] E2E test (waiting on above)
+## Експлуатація
+
+```bash
+bash scripts/backup_db.sh                    # дамп бази (щоночі о 03:30 по крону)
+python scripts/diag_leads.py Прізвище        # чому кандидат не дійшов до CRM
+python scripts/rotate_keycrm_key.sh --check  # чи живий ключ CRM
+```
+
+## Що знати перед правками
+
+Головна пастка проєкту — **тиха відмова**. Тричі поспіль система «працювала» з
+нульовим результатом: дедуп по телефону, опитування robota.ua, інтейк work.ua.
+Лічильник на нулі без помилок — це підозра, а не норма.
+
+- не fail-open на дедупі: помилка перевірки означає «пропусти», не «створюй»;
+- числа в репліках Єви пишуться словами — їх вимовляє синтез;
+- KeyCRM відповідає `202` і на те, що ігнорує, а зміни застосовує із затримкою
+  до ~15 с: будь-який запис перечитувати;
+- robota.ua ловить Cloudflare при частих запитах — темп опитування вистражданий,
+  не прискорювати.
+
+Детальний стан і історія рішень — у `HANDOFF_*.md`, найсвіжіший читати першим.
