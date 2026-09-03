@@ -426,8 +426,14 @@ def _pending_as_apply(apply_id: str, entry: dict) -> dict:
         "cityId": entry.get("city_id"),
         "speciality": entry.get("speciality"),
         "resumeType": entry.get("resume_type"),
+        # Without this the backlog cannot be worked at all: opening a contact
+        # begins by reading `resumeId`, and an apply rebuilt without one is
+        # refused before any rule is consulted. 181 parked applies sat behind
+        # that omission with the openings counter reading a healthy zero.
+        "resumeId": entry.get("resume_id"),
         "fileName": entry.get("file_name"),
         "filePath": entry.get("file_path"),
+        "resumeFile": entry.get("resume_file"),
     }
 
 
