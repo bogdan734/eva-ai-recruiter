@@ -299,6 +299,7 @@ resume_text, callback_at, outreach_sent_at, created_at, updated_at
 | `robotaua_chat_poll` | хв `8-59/15` | чати robota.ua |
 | `reconcile_calls` | кожні 10 хв | добиває незавершені дзвінки |
 | `crm_stage_sync` | хв `5-59/10` | синхронізація етапів у KeyCRM |
+| `missing_cards` | хв `17,47` | картка для тих, кого KeyCRM відхилив на інтейку (`manager_review` без картки, за 48 год) |
 | `workua_session_keepalive` | кожні 20 хв | продовжує сесію work.ua |
 | `workua_cold_sourcing` | 06:45 | холодний пошук резюме |
 | `unreachable_giveup` | 08:30 | закриває безнадійно недозвонних |
