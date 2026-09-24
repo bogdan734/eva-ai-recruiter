@@ -131,7 +131,33 @@ SYSTEM_PROMPT = """Ти — Єва, помічниця рекрутера ком
 - На агресію — вибачся, згорни діалог.
 - Жодних обіцянок по зарплаті поза вилкою 25-65 тис.
 - Не проси документи, тільки резюме/профіль.
+- Замість вкладень ти бачиш позначку: [голосове повідомлення], [відеоповідомлення],
+  [стікер], [фото], [файл]. Відкрити їх не можеш. На голосове чи відео: «Вибачте,
+  зараз не можу прослухати — напишіть, будь ласка, текстом». На стікер — просто
+  продовжуй розмову. Фото чи файл після питання про резюме — подякуй і продовжуй.
 """
+
+# Checked in this order: Telegram also marks a voice note or a sticker as a document.
+_ATTACHMENTS = (
+    ("voice", "[голосове повідомлення]"),
+    ("video_note", "[відеоповідомлення]"),
+    ("sticker", "[стікер]"),
+    ("photo", "[фото]"),
+    ("document", "[файл]"),
+)
+
+
+def incoming_text(message) -> str:
+    """What Eva reads from an incoming message: its text, else a placeholder for the
+    attachment, else "" (nothing to answer). Never store an empty turn — the API
+    refuses the whole conversation after one."""
+    text = (getattr(message, "raw_text", None) or "").strip()
+    if text:
+        return text
+    for attr, placeholder in _ATTACHMENTS:
+        if getattr(message, attr, None):
+            return placeholder
+    return ""
 
 INTRO_TEMPLATE = (
     "Доброго дня! Мене звати Єва, я з компанії Kozyr Trans — "

@@ -25,7 +25,7 @@ from telethon.tl.types import InputPhoneContact
 from anthropic import Anthropic
 
 import store
-from persona import SYSTEM_PROMPT as _BASE_PROMPT, INTRO_TEMPLATE
+from persona import SYSTEM_PROMPT as _BASE_PROMPT, INTRO_TEMPLATE, incoming_text
 
 load_dotenv()
 API_ID = int(os.environ["TG_API_ID"])
@@ -667,7 +667,10 @@ async def on_message(event):
     peer = str(sender.id)
     if peer in TG_ADMIN_PEERS:  # a recruiter writing in, not a candidate
         return
-    store.log_message(peer, "user", event.raw_text)
+    text = incoming_text(event.message)
+    if not text:  # nothing to read or answer (location, contact card, service message)
+        return
+    store.log_message(peer, "user", text)
 
     # Debounce: if the candidate fires several messages in a row, wait for the
     # burst to settle and reply ONCE. Each incoming message bumps the peer token;
@@ -704,7 +707,7 @@ async def on_message(event):
     store.log_message(peer, "assistant", reply)
     await _push_progress(peer, sender, store.history(peer))
     await report_outcome_if_ready(peer, sender, store.history(peer))
-    print(f"[{getattr(sender, 'first_name', peer)}] {event.raw_text[:50]!r} -> {reply[:50]!r}", flush=True)
+    print(f"[{getattr(sender, 'first_name', peer)}] {text[:50]!r} -> {reply[:50]!r}", flush=True)
 
 
 async def catch_up_unread(max_dialogs: int = 20, dry_run: bool = False,
@@ -745,7 +748,7 @@ async def catch_up_unread(max_dialogs: int = 20, dry_run: bool = False,
                      if m["role"] == "user"}
             missed: list[str] = []
             async for m in client.iter_messages(sender, limit=min(dialog.unread_count, 20)):
-                text = (m.raw_text or "").strip()
+                text = incoming_text(m)
                 if m.out or not text or text in known:
                     continue
                 missed.append(text)

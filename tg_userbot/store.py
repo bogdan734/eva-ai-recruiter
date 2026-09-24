@@ -72,9 +72,12 @@ def log_message(peer: str, role: str, text: str):
     c.commit(); c.close()
 
 def history(peer: str, limit: int = 30):
+    # Empty rows are voice notes and stickers stored before they got a placeholder.
+    # The API rejects a conversation with an empty turn, so one of them used to
+    # fail every later reply to that person.
     c = _conn()
-    rows = c.execute("SELECT role,text FROM messages WHERE peer=? ORDER BY id DESC LIMIT ?",
-                     (peer, limit)).fetchall()
+    rows = c.execute("SELECT role,text FROM messages WHERE peer=? AND TRIM(text)<>'' "
+                     "ORDER BY id DESC LIMIT ?", (peer, limit)).fetchall()
     c.close()
     return [{"role": r, "content": t} for r, t in reversed(rows)]
 
