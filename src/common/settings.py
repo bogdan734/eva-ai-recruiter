@@ -173,7 +173,7 @@ class Settings(BaseSettings):
     # (default); "selfhosted" = our own {APP_BASE_URL}/resume/{id} page rendered from
     # the stored resume text (works without a work.ua login; used for robota.ua too).
     resume_link_mode: str = "workua"
-    company_name: str = "Kozyr Trans"
+    company_name: str = "Козир Транс"  # Cyrillic: the TTS reads latin letters in English
     company_pitch: str = (
         "Ми займаємося організацією внутрішніх та міжнародних вантажоперевезень."
     )
