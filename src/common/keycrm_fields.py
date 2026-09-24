@@ -81,11 +81,29 @@ _CRM_STAGE_STOP: dict[int, str] = {
 }
 
 
-def crm_stage_stop_status(status_id: int | None) -> str | None:
+def crm_stage_stop_status(
+    status_id: int | None,
+    local_status: str | None = None,
+    callback_at: Any = None,
+) -> str | None:
     """Given a card's live KeyCRM status_id, return the local candidate status Eva
     should move to because a recruiter took over or dispositioned the card — or None if
-    the stage is still one of Eva's own working stages (1 Новий / 2 Відібрано / 31 Недозвін)."""
-    return _CRM_STAGE_STOP.get(status_id) if status_id is not None else None
+    the stage is still one of Eva's own working stages (1 Новий / 2 Відібрано / 31 Недозвін).
+
+    Since 02.09 «В роботі» (3) is also where Eva herself parks two kinds of candidate
+    she is still working: a screening she finishes in Telegram (call_done) and a
+    callback she promised (in_call_queue with callback_at). Reading her own move back
+    as a recruiter's silenced her in Telegram and dropped the callbacks, so for those
+    two the stage is still hers. Pass the candidate's local status to get that.
+    """
+    if status_id is None:
+        return None
+    if status_id == 3 and (
+        local_status == "call_done"
+        or (local_status == "in_call_queue" and callback_at is not None)
+    ):
+        return None
+    return _CRM_STAGE_STOP.get(status_id)
 
 
 def build_lead_payload(

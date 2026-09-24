@@ -96,6 +96,9 @@ async def handle_tg_outcome(
                     Candidate.phone_e164.like("+%"),
                 ).limit(1)
             )).scalar_one_or_none()
+        # What Eva was doing with this person before the verdict — decides below
+        # whether «В роботі» on the card is hers or a recruiter's.
+        prev_status, prev_callback = None, None
         if cand is None:
             cand = Candidate(
                 full_name=name or handle,
@@ -107,6 +110,7 @@ async def handle_tg_outcome(
             sess.add(cand)
             await sess.flush()
         else:
+            prev_status, prev_callback = cand.status, cand.callback_at
             cand.status = status
             if region and not cand.region:
                 cand.region = region
@@ -155,7 +159,7 @@ async def handle_tg_outcome(
             # transcript, not drag the card back into Eva's funnel.
             if stage_id is not None:
                 live_stage = await kc.get_card_status(lead_id)
-                if crm_stage_stop_status(live_stage) is not None:
+                if crm_stage_stop_status(live_stage, prev_status, prev_callback) is not None:
                     log.info(
                         "tg_outcome.stage_kept",
                         lead_id=lead_id, live_stage=live_stage, wanted=stage_id,

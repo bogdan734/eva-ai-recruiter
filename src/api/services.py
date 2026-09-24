@@ -33,7 +33,10 @@ async def handle_keycrm_event(event: str, payload: KeyCRMWebhookPayload) -> None
         cand = (await session.execute(
             select(Candidate).where(Candidate.keycrm_lead_id == payload.lead.id)
         )).scalars().first()
-        if cand:
+        # The card may sit in «В роботі» because Eva put it there herself.
+        if cand and crm_stage_stop_status(
+            payload.lead.stage_id, cand.status, cand.callback_at
+        ):
             target = CandidateStatus(stop)
             if cand.status != target:
                 cand.status = target
