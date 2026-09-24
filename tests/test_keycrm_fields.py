@@ -1,11 +1,15 @@
+from datetime import UTC, datetime
+
 from src.common import keycrm_fields
 from src.common.keycrm_fields import (
     FIELD_MAP,
     STAGE_MAP,
     build_lead_payload,
+    crm_stage_stop_status,
     load_mapping_from_api,
     load_stages_from_api,
 )
+from src.common.models import CandidateStatus
 
 
 def test_field_map_has_all_24_keys():
@@ -56,6 +60,36 @@ def test_stage_map_covers_every_status_we_write():
         "interview_scheduled",
         "closed",
     }
+
+
+def test_in_work_does_not_stop_a_screening_eva_finishes_in_telegram():
+    """Since 02.09 Eva parks her own unfinished screenings in «В роботі» (3) and
+    writes to them in Telegram. The sync used to read that back as a recruiter
+    taking over, and the Telegram gate then kept her silent when they replied."""
+    assert crm_stage_stop_status(3, "call_done") is None
+    assert crm_stage_stop_status(3, CandidateStatus.CALL_DONE) is None
+
+
+def test_in_work_does_not_stop_a_promised_callback():
+    due = datetime(2026, 9, 24, 15, 0, tzinfo=UTC)
+    assert crm_stage_stop_status(3, "in_call_queue", due) is None
+
+
+def test_in_work_still_stops_a_candidate_eva_had_in_the_pool():
+    assert crm_stage_stop_status(3) == "manager_review"
+    assert crm_stage_stop_status(3, "in_call_queue") == "manager_review"
+    assert crm_stage_stop_status(3, "unreachable") == "manager_review"
+
+
+def test_recruiter_disposition_still_stops_a_telegram_follow_up():
+    assert crm_stage_stop_status(32, "call_done") == "closed"
+    assert crm_stage_stop_status(10, "call_done") == "interview_scheduled"
+    assert crm_stage_stop_status(34, "in_call_queue", datetime.now(UTC)) == "closed"
+
+
+def test_eva_working_stages_never_stop():
+    for stage in (1, 2, 31, None):
+        assert crm_stage_stop_status(stage, "call_done") is None
 
 
 def test_load_mapping_populates_ids():

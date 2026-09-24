@@ -251,7 +251,7 @@ async def sync_crm_stages() -> None:
             for cand in rows:
                 seen += 1
                 sid = await kc.get_card_status(cand.keycrm_lead_id)
-                stop = crm_stage_stop_status(sid)
+                stop = crm_stage_stop_status(sid, cand.status, cand.callback_at)
                 if stop:
                     target = CandidateStatus(stop)
                     if cand.status != target:
