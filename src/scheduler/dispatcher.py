@@ -483,9 +483,10 @@ async def poll_workua_responses() -> None:
         from src.integrations.workua_sync import poll_responses
         stats = await poll_responses()
         log.info(
-            "workua.poll stats=new=%d accepted=%d duplicates=%d rejected=%d profile_rejected=%d errors=%d",
+            "workua.poll stats=new=%d accepted=%d duplicates=%d rejected=%d "
+            "profile_rejected=%d no_phone=%d errors=%d",
             stats.new_responses, stats.accepted, stats.duplicates,
-            stats.rejected, stats.profile_rejected, stats.errors,
+            stats.rejected, stats.profile_rejected, stats.no_phone, stats.errors,
         )
     except Exception as e:
         log.exception("workua.poll_failed: %s", e)

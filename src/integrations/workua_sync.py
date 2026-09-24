@@ -62,6 +62,7 @@ class PollStats:
     duplicates: int = 0
     rejected: int = 0
     profile_rejected: int = 0
+    no_phone: int = 0
     errors: int = 0
     last_id: int | None = None
 
@@ -146,8 +147,17 @@ async def _ingest_response(resp: Any, *, router: InboundRouter, stats: PollStats
     response has to pass exactly the same gates as a fresh one, or the two paths
     drift and only one of them gets the next screening fix.
     """
+    # The cursor moves past this response either way. Without a line naming it,
+    # "4 responses in the cabinet, 3 cards" had no answer in the logs.
     if not resp.phone:
-        stats.rejected += 1
+        stats.no_phone += 1
+        log.warning(
+            "workua.response_no_phone",
+            response_id=resp.id,
+            job_id=resp.job_id,
+            name=resp.fio,
+            type=resp.type,
+        )
         return
 
     route = vacancies.for_workua(resp.job_id) or vacancies.DEFAULT
@@ -192,6 +202,13 @@ async def _ingest_response(resp: Any, *, router: InboundRouter, stats: PollStats
     )
     if not result.accepted:
         stats.rejected += 1
+        log.warning(
+            "workua.ingest_rejected",
+            response_id=resp.id,
+            job_id=resp.job_id,
+            name=full_name,
+            reason=result.reason,
+        )
     elif result.duplicate:
         stats.duplicates += 1
     else:
