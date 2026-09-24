@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import structlog
 from sqlalchemy import select
@@ -543,3 +543,78 @@ class InboundRouter:
             candidate_id=new_candidate_id,
             keycrm_lead_id=lead_id,
         )
+
+
+async def issue_missing_cards(
+    router: InboundRouter | None = None,
+    *,
+    window_hours: int = 48,
+    settle_minutes: int = 10,
+    limit: int = 20,
+) -> int:
+    """Cards for applicants who reached our database and not the CRM.
+
+    A failed create comes back as `keycrm_failed`, which counts as accepted: the
+    row is written, the card is not, and the board cursor that brought the
+    person in has already moved on. Nothing asked KeyCRM a second time.
+
+    Every row picked here is one a card was due for. MANAGER_REVIEW is where a
+    response, an intake-only applicant and a qualified call all wait for a human,
+    and each of those has a card by then. Sourced candidates waiting for Єва sit
+    in NEW_RESUME; a synthetic Telegram key has no number to put on a card. The
+    window keeps old, settled rows out. A row touched in the last few minutes
+    may be an ingest still waiting on KeyCRM, and taking it now would make a
+    second card. Returns the number of cards made.
+    """
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=window_hours)
+    settled = now - timedelta(minutes=settle_minutes)
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(Candidate)
+                .where(Candidate.keycrm_lead_id.is_(None))
+                .where(Candidate.status == CandidateStatus.MANAGER_REVIEW)
+                .where(Candidate.phone_e164.like("+%"))
+                .where(Candidate.created_at >= since)
+                .where(Candidate.updated_at <= settled)
+                .order_by(Candidate.id)
+                .limit(limit)
+            )
+        ).scalars().all()
+        # Built inside the session: the rows are detached once it closes.
+        todo = [
+            IngestPayload(
+                full_name=c.full_name,
+                phone_raw=c.phone_e164,
+                email=c.email,
+                region_raw=c.region,
+                desired_position=c.desired_position,
+                experience_years=c.experience_years,
+                work_ua_url=c.work_ua_url,
+                resume_text=c.resume_text,
+                source=c.source,
+                vacancy_id=c.vacancy_id,
+                vacancy_key=c.vacancy_key or vacancies.DEFAULT.key,
+                # Only people waiting for a human are here, and that is what a
+                # response is: no screening, no deferral, a card.
+                is_response=True,
+            )
+            for c in rows
+        ]
+    if not todo:
+        return 0
+    router = router or InboundRouter()
+    made = 0
+    for payload in todo:
+        result = await router.ingest(payload)
+        if result.keycrm_lead_id:
+            made += 1
+        log.warning(
+            "ingest.missing_card_retry",
+            candidate_id=result.candidate_id,
+            name=payload.full_name,
+            lead_id=result.keycrm_lead_id,
+            reason=result.reason,
+        )
+    return made

@@ -521,6 +521,17 @@ async def poll_robotaua_responses() -> None:
         log.exception("robotaua.poll_failed: %s", e)
 
 
+async def retry_missing_cards() -> None:
+    """Cards for applicants KeyCRM refused at intake — see issue_missing_cards."""
+    try:
+        from src.api.inbound_router import issue_missing_cards
+        made = await issue_missing_cards()
+        if made:
+            log.info("intake.missing_cards_issued made=%d", made)
+    except Exception as e:
+        log.exception("intake.missing_cards_failed: %s", e)
+
+
 async def poll_robotaua_chats() -> None:
     """robota.ua cabinet chat poller.
 
@@ -619,6 +630,15 @@ def build_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=120,
+    )
+    # Safety net: an applicant in our database whose card KeyCRM refused. Off the
+    # pollers' minutes, so a sweep never lands on an ingest still mid-create.
+    scheduler.add_job(
+        retry_missing_cards,
+        trigger=CronTrigger(minute="17,47", timezone=s.app_timezone),
+        id="missing_cards",
+        replace_existing=True,
+        max_instances=1,
     )
     # Safety net: pull any call whose webhook never arrived.
     scheduler.add_job(

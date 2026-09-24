@@ -9,16 +9,21 @@
    or not the person had a card. Anyone we held without one — ingested while
    deferral was on, found by cold sourcing and still waiting for a call, or
    whose card creation failed — answered the posting again and vanished.
+
+And one way it never retried: a failed create is `keycrm_failed`, counted as
+accepted, and the board cursor moves past the applicant. `issue_missing_cards`
+is the retry.
 """
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from src.api.inbound_router import InboundRouter, IngestPayload
+from src.api.inbound_router import InboundRouter, IngestPayload, issue_missing_cards
 from src.common import vacancies
 from src.common.models import Base, Candidate, CandidateStatus
 
@@ -177,6 +182,56 @@ async def test_unreachable_crm_never_reads_as_a_deleted_card(db):
 
     assert crm.created == []
     assert result.duplicate is True
+
+
+class _FlakyCRM(_FakeCRM):
+    """KeyCRM answering 429 to the first create, as it does under a burst."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail_next = True
+
+    async def create_lead(self, **kw):
+        if self.fail_next:
+            self.fail_next = False
+            raise RuntimeError("429 Too Many Requests")
+        return await super().create_lead(**kw)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_create_is_retried_by_the_sweep(db):
+    """`keycrm_failed` counts as accepted and the board cursor moves on; before
+    the sweep nothing ever asked KeyCRM again."""
+    crm = _FlakyCRM()
+    router = InboundRouter(keycrm=crm)
+
+    first = await router.ingest(_response(vacancy_key="accountant", board_vacancy_id=8242731))
+    assert first.reason.startswith("keycrm_failed")
+    assert await _lead_id(db, first.candidate_id) is None
+
+    # Fresh rows are left alone for a while: the ingest may still be talking to KeyCRM.
+    assert await issue_missing_cards(router) == 0
+
+    made = await issue_missing_cards(router, settle_minutes=0)
+
+    assert made == 1
+    assert len(crm.created) == 1
+    assert crm.created[0]["pipeline_id"] == vacancies.get("accountant").keycrm_pipeline_id
+    assert await _lead_id(db, first.candidate_id) == 9001
+    assert await issue_missing_cards(router, settle_minutes=0) == 0
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_leaves_rows_that_are_not_waiting_for_a_human(db):
+    await _seed(db, status=CandidateStatus.NEW_RESUME)  # sourced, deferred until the call
+    await _seed(db, phone_e164="tg555", source="telegram",
+                status=CandidateStatus.MANAGER_REVIEW)  # no number to put on a card
+    await _seed(db, phone_e164="+380501112233", status=CandidateStatus.MANAGER_REVIEW,
+                created_at=datetime.now(timezone.utc) - timedelta(days=30))  # long settled
+    crm = _FakeCRM()
+
+    assert await issue_missing_cards(InboundRouter(keycrm=crm), settle_minutes=0) == 0
+    assert crm.created == []
 
 
 @pytest.mark.asyncio
