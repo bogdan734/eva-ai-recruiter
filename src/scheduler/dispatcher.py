@@ -631,8 +631,8 @@ def build_scheduler() -> AsyncIOScheduler:
         max_instances=1,
         misfire_grace_time=120,
     )
-    # Safety net: an applicant in our database whose card KeyCRM refused. Off the
-    # pollers' minutes, so a sweep never lands on an ingest still mid-create.
+    # Safety net: an applicant in our database whose card KeyCRM refused. Rows an
+    # ingest may still be creating are skipped by the sweep's ten-minute settle.
     scheduler.add_job(
         retry_missing_cards,
         trigger=CronTrigger(minute="17,47", timezone=s.app_timezone),

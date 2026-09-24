@@ -443,17 +443,34 @@ UNMAPPED_KEY = "unmapped"
 UNMAPPED_LIMIT = 500
 
 
-def _release_mapped(unmapped: dict[str, dict], pending: dict[str, dict], allowed: set) -> int:
-    """Move applies whose posting is now mapped into `pending`, where the usual
-    re-check picks them up. Returns how many were released."""
+def _release_mapped(
+    unmapped: dict[str, dict],
+    *,
+    allowed: set,
+    window: dict[str, dict],
+    seen: set[int],
+    fresh: list[dict],
+    pending: dict[str, dict],
+) -> int:
+    """Hand back the applies whose posting is now mapped. Returns how many.
+
+    One still in the fetched window goes through the fresh path, exactly as if
+    it had just arrived: attached CV, contact opening, parking. The pending
+    re-check only reads a phone off a window row, so a phoneless apply released
+    there would sit untouched until it fell out of the window, days later.
+    """
     released = 0
     for apply_id in [k for k, e in unmapped.items() if not allowed or e.get("vacancy_id") in allowed]:
         entry = unmapped.pop(apply_id)
+        released += 1
+        row = window.get(apply_id)
+        if row is not None and int(apply_id) not in seen:
+            fresh.append(row)
+            continue
         # The pending TTL counts from here: the wait for a mapping is not the
         # applicant's fault, and a late mapping must not expire them on arrival.
         entry["first_seen"] = datetime.utcnow().isoformat(timespec="seconds")
         pending.setdefault(apply_id, entry)
-        released += 1
     return released
 
 
@@ -698,11 +715,6 @@ async def poll_responses(
     pending: dict[str, dict] = dict(cursor.get("pending") or {})
     allowed = allowed_vacancy_ids()
     unmapped: dict[str, dict] = dict(cursor.get(UNMAPPED_KEY) or {})
-    released = _release_mapped(unmapped, pending, allowed)
-    if released:
-        # WARNING because it is the receipt for a loss being undone — how you
-        # learn that mapping the posting in the panel actually took effect.
-        log.warning("robotaua.unmapped_released", released=released)
     # Applies to postings nobody has mapped. Counted per run and reported once,
     # never dropped in silence: a republished vacancy arrives here as a live id
     # that matches nothing, and on work.ua exactly that carried 74% of the flow
@@ -766,6 +778,14 @@ async def poll_responses(
         stats.errors += 1
         log.error("robotaua.list_failed", error=str(e))
         return stats
+
+    released = _release_mapped(
+        unmapped, allowed=allowed, window=window, seen=seen, fresh=fresh, pending=pending
+    )
+    if released:
+        # WARNING because it is the receipt for a loss being undone — how you
+        # learn that mapping the posting in the panel actually took effect.
+        log.warning("robotaua.unmapped_released", released=released)
 
     if unknown_vacancies:
         # WARNING, not info: this is the signal that a posting was republished

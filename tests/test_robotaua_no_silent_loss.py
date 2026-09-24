@@ -130,6 +130,21 @@ async def test_an_apply_to_an_unmapped_posting_is_replayed_once_it_is_mapped(mon
     assert cursor["pending"] == {}
 
 
+@pytest.mark.asyncio
+async def test_a_released_apply_that_left_the_window_waits_in_pending(monkeypatch):
+    cabinet = _Cabinet([_apply(7, "Катерина Шевченко", vacancy=NEW_POSTING)])
+    router = _Router()
+    await rs.poll_responses(client=cabinet, router=router)
+
+    cabinet.applies = []  # days later: the apply is no longer among the newest
+    monkeypatch.setenv("ROBOTAUA_ALLOWED_VACANCY_IDS", str(NEW_POSTING))
+    await rs.poll_responses(client=cabinet, router=router)
+
+    cursor = rs.load_cursor()
+    assert cursor["unmapped"] == {}
+    assert set(cursor["pending"]) == {"7"}
+
+
 def test_a_parked_entry_rebuilds_into_the_apply_it_came_from():
     """Budget-parked and released applies go through `_pending_as_apply` later."""
     apply = _apply(9, "Інна Чудновська", kind="AttachedFile") | {
