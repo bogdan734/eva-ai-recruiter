@@ -381,6 +381,7 @@ async def reconcile_unfinalized() -> None:
     if not rows:
         return
 
+    s = get_settings()
     orch = CallOrchestrator()
     fixed = 0
     async with httpx.AsyncClient(
