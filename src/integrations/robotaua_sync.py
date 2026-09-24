@@ -412,6 +412,62 @@ def worth_opening(apply: dict, region: str | None) -> bool:
     return True
 
 
+def _parked_entry(apply: dict) -> dict:
+    """What a parked apply keeps — everything `_pending_as_apply` rebuilds from."""
+    return {
+        "resume_id": int(apply.get("resumeId") or 0),
+        "name": (apply.get("name") or "").strip(),
+        "vacancy_id": apply.get("vacancyId"),
+        "resume_type": apply.get("resumeType"),
+        # Kept so a later maintenance pass can rank the backlog for
+        # contact opening without re-fetching the applies feed.
+        "city_id": apply.get("cityId"),
+        "speciality": apply.get("speciality"),
+        # `AttachedFile` applies carry the CV as an uploaded file and
+        # have resumeId=0 — there is no resume record to fetch, which
+        # is why /resume/{id} never found one. The phone lives inside
+        # that file. Capture the references now so working out the
+        # download URL later costs no extra requests: robota.ua bans
+        # this IP for hours when we probe it in bursts.
+        "file_name": apply.get("fileName"),
+        "file_path": apply.get("filePath"),
+        "resume_file": apply.get("resumeFile"),
+        "first_seen": datetime.utcnow().isoformat(timespec="seconds"),
+    }
+
+
+# Applies to postings the registry does not know, kept until someone maps the
+# id. The date cursor moves past them like everything else in the window, so
+# without this a republished posting's applicants were gone for good.
+UNMAPPED_KEY = "unmapped"
+UNMAPPED_LIMIT = 500
+
+
+def _release_mapped(unmapped: dict[str, dict], pending: dict[str, dict], allowed: set) -> int:
+    """Move applies whose posting is now mapped into `pending`, where the usual
+    re-check picks them up. Returns how many were released."""
+    released = 0
+    for apply_id in [k for k, e in unmapped.items() if not allowed or e.get("vacancy_id") in allowed]:
+        entry = unmapped.pop(apply_id)
+        # The pending TTL counts from here: the wait for a mapping is not the
+        # applicant's fault, and a late mapping must not expire them on arrival.
+        entry["first_seen"] = datetime.utcnow().isoformat(timespec="seconds")
+        pending.setdefault(apply_id, entry)
+        released += 1
+    return released
+
+
+def _trim_unmapped(unmapped: dict[str, dict], stale_before: datetime) -> dict[str, dict]:
+    """Drop what the pending TTL would drop anyway, then keep the newest few hundred:
+    the account also carries postings nobody here recruits for."""
+    fresh = {
+        k: e for k, e in unmapped.items()
+        if (parse_add_date(e.get("first_seen")) or datetime.utcnow()) >= stale_before
+    }
+    newest = sorted(fresh, key=lambda k: fresh[k].get("first_seen") or "", reverse=True)
+    return {k: fresh[k] for k in newest[:UNMAPPED_LIMIT]}
+
+
 def _pending_as_apply(apply_id: str, entry: dict) -> dict:
     """Rebuild an apply-shaped dict from a parked entry.
 
@@ -641,6 +697,12 @@ async def poll_responses(
     seen: set[int] = {int(x) for x in cursor.get("seen_ids") or []}
     pending: dict[str, dict] = dict(cursor.get("pending") or {})
     allowed = allowed_vacancy_ids()
+    unmapped: dict[str, dict] = dict(cursor.get(UNMAPPED_KEY) or {})
+    released = _release_mapped(unmapped, pending, allowed)
+    if released:
+        # WARNING because it is the receipt for a loss being undone — how you
+        # learn that mapping the posting in the panel actually took effect.
+        log.warning("robotaua.unmapped_released", released=released)
     # Applies to postings nobody has mapped. Counted per run and reported once,
     # never dropped in silence: a republished vacancy arrives here as a live id
     # that matches nothing, and on work.ua exactly that carried 74% of the flow
@@ -684,6 +746,11 @@ async def poll_responses(
                     continue
                 if allowed and apply.get("vacancyId") not in allowed:
                     unknown_vacancies[apply.get("vacancyId")] += 1
+                    # Kept, not just counted: mapping the id later is enough to
+                    # get these people back. `Interaction` would be refused on
+                    # replay, so it is not worth the space.
+                    if str(apply.get("resumeType") or "") != "Interaction":
+                        unmapped.setdefault(apply_id, _parked_entry(apply))
                     continue
                 fresh.append(apply)
             if reached_old:
@@ -702,8 +769,9 @@ async def poll_responses(
 
     if unknown_vacancies:
         # WARNING, not info: this is the signal that a posting was republished
-        # under a new id and its applicants are going nowhere. Map it in the
-        # panel (Параметри вакансії → вакансія → Збір і обдзвін).
+        # under a new id and its applicants are waiting. Map it in the panel
+        # (Параметри вакансії → вакансія → Збір і обдзвін) and the next poll
+        # releases them from the `unmapped` ledger on its own.
         log.warning(
             "robotaua.unknown_vacancies",
             vacancies=dict(unknown_vacancies),
@@ -717,6 +785,10 @@ async def poll_responses(
     async def _handle_reachable(apply: dict) -> bool:
         """CV fetch + intake for an apply whose contacts are open."""
         nonlocal cv_budget, blocked
+        if str(apply.get("resumeType") or "") == "Interaction":
+            # Refused by `_ingest_one` whatever the CV says. Fetching it first
+            # spent the budget the real applicants behind it needed.
+            return await _ingest_one(router, parse_apply(apply, cities=cities), stats, dry_run=dry)
         if cv_budget <= 0:
             log.info("robotaua.cv_budget_spent", apply=apply.get("id"), budget=max_cv)
             return False
@@ -730,7 +802,10 @@ async def poll_responses(
         try:
             if row_phone(apply):
                 if not await _handle_reachable(apply):
-                    continue  # budget spent — retry on the next poll
+                    # Budget spent. Parked, not skipped: the date cursor is about
+                    # to move past this apply, and a bare `continue` here meant
+                    # the "next poll" it promised never saw it again.
+                    pending[str(apply_id)] = _parked_entry(apply)
             elif await _try_attached_file(client, router, apply, cities, stats, dry=dry):
                 pass  # phone read out of the uploaded CV — free, no quota spent
             elif await _try_auto_open(client, router, apply, cities, cursor, stats, dry=dry):
@@ -746,33 +821,16 @@ async def poll_responses(
                     # the contact-opening queue the bot reports. The response is
                     # still visible to the recruiter in the robota.ua cabinet.
                     seen.add(apply_id)
-                    log.info(
+                    # WARNING: a genuine applicant the recruiter can see in the
+                    # cabinet and will not find in the CRM. Say so by name.
+                    log.warning(
                         "robotaua.intake_only_no_phone",
                         apply=apply_id,
                         vacancy=apply.get("vacancyId"),
                         name=apply.get("name"),
                     )
                     continue
-                pending[str(apply_id)] = {
-                    "resume_id": int(apply.get("resumeId") or 0),
-                    "name": (apply.get("name") or "").strip(),
-                    "vacancy_id": apply.get("vacancyId"),
-                    "resume_type": apply.get("resumeType"),
-                    # Kept so a later maintenance pass can rank the backlog for
-                    # contact opening without re-fetching the applies feed.
-                    "city_id": apply.get("cityId"),
-                    "speciality": apply.get("speciality"),
-                    # `AttachedFile` applies carry the CV as an uploaded file and
-                    # have resumeId=0 — there is no resume record to fetch, which
-                    # is why /resume/{id} never found one. The phone lives inside
-                    # that file. Capture the references now so working out the
-                    # download URL later costs no extra requests: robota.ua bans
-                    # this IP for hours when we probe it in bursts.
-                    "file_name": apply.get("fileName"),
-                    "file_path": apply.get("filePath"),
-                    "resume_file": apply.get("resumeFile"),
-                    "first_seen": datetime.utcnow().isoformat(timespec="seconds"),
-                }
+                pending[str(apply_id)] = _parked_entry(apply)
                 log.info(
                     "robotaua.contacts_closed",
                     apply=apply_id,
@@ -947,10 +1005,13 @@ async def poll_responses(
 
         if not row_phone(row):
             continue
-        stats.recovered += 1
-        log.info("robotaua.contacts_opened", apply=apply_id, name=row.get("name"))
         try:
+            # Counted only once it is through: an apply parked by the CV budget
+            # sits here with a visible phone and would otherwise read as
+            # "recovered" on every poll it waits.
             if await _handle_reachable(row):
+                stats.recovered += 1
+                log.info("robotaua.contacts_opened", apply=apply_id, name=row.get("name"))
                 pending.pop(apply_id, None)
         except RobotaUaBlockedError as e:
             blocked = True
@@ -972,6 +1033,7 @@ async def poll_responses(
                 "last_add_date": stats.last_add_date or newest_dt.isoformat(timespec="seconds"),
                 "seen_ids": sorted(seen)[-SEEN_LIMIT:],
                 "pending": pending,
+                UNMAPPED_KEY: _trim_unmapped(unmapped, stale_before),
                 "updated_at": datetime.utcnow().isoformat(timespec="seconds"),
             }
         )
