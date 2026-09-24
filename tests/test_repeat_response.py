@@ -42,6 +42,14 @@ class _FakeCRM:
     def __init__(self):
         self.comments: list[tuple[int, str]] = []
         self.moves: list[tuple[int, int]] = []
+        self.created: list[dict] = []
+
+    async def card_pipeline(self, lead_id):
+        return 1  # the card is alive
+
+    async def create_lead(self, **kw):
+        self.created.append(kw)
+        return {"id": 777}
 
     async def append_manager_comment(self, lead_id, addition):
         self.comments.append((lead_id, addition))
@@ -159,9 +167,11 @@ async def test_sourced_rediscovery_is_silent_not_a_response(db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_no_existing_card_is_a_silent_noop_no_crash(db, monkeypatch):
-    """A closed candidate can have no keycrm_lead_id yet in deferred mode --
-    nothing to comment on or move, and this must not raise."""
+async def test_no_existing_card_gets_one_instead_of_nothing(db, monkeypatch):
+    """A closed candidate can have no keycrm_lead_id (deferred mode, a failed
+    create). This used to be a silent no-op, which is how a repeat applicant
+    never reached the CRM at all. Now the response makes the card; there is
+    nothing to comment on or move."""
     monkeypatch.setattr("src.api.inbound_router.session_scope", _autocommitting(db), raising=False)
     await _seed(db, status=CandidateStatus.CLOSED, keycrm_lead_id=None)
     crm = _FakeCRM()
@@ -169,7 +179,8 @@ async def test_no_existing_card_is_a_silent_noop_no_crash(db, monkeypatch):
 
     result = await router.ingest(_payload())
 
-    assert result.duplicate is True
+    assert result.duplicate is False
+    assert len(crm.created) == 1
     assert crm.comments == []
     assert crm.moves == []
 

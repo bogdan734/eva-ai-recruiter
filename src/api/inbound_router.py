@@ -6,6 +6,8 @@ Two modes controlled by DEFER_KEYCRM_UNTIL_QUALIFIED env (default: on):
     created later by the orchestrator's post-call `_finalize_call` after
     Єва's screening produces a decision. This keeps the CRM clean —
     only candidates who actually spoke with Єва land in the funnel.
+    Sourced candidates only: a response (is_response) is never called, so
+    it always gets its card at ingest.
 
   - eager (legacy): creates KeyCRM lead immediately on inbound. Kept for
     fallback if a client wants CRM to mirror raw work.ua activity.
@@ -244,6 +246,22 @@ class InboundRouter:
                 status=existing.status,
             )
 
+    async def _has_live_card(self, existing: Candidate) -> bool:
+        """Does this row still point at a card that exists, in any funnel?
+
+        Any funnel, unlike the intake-only check below: a card of a vacancy Єва
+        works moves on to later funnels as the person progresses, and that is
+        still their card. Only a missing id or a deleted card is "no card". A
+        CRM we cannot reach counts as a live card — a duplicate is worse than a
+        comment on a card that may be gone.
+        """
+        if not existing.keycrm_lead_id:
+            return False
+        try:
+            return await self._keycrm.card_pipeline(int(existing.keycrm_lead_id)) is not None
+        except Exception:
+            return True
+
     async def ingest(self, payload: IngestPayload) -> IngestResult:
         route = vacancies.get(payload.vacancy_key)
 
@@ -313,26 +331,43 @@ class InboundRouter:
                         existing_lead_id=existing.keycrm_lead_id,
                     )
                 elif route.calls_enabled:
-                    # 07.09.2026: this used to return here in total silence --
-                    # a repeat robota.ua/work.ua response from someone we
-                    # already have a card for vanished with no trace (the
-                    # Таран Максим case). A recruiter who had already closed
-                    # or given up on a candidate had no way to learn they came
-                    # back, short of manually re-checking robota.ua by hand.
-                    # Comment always, since that costs nothing and is never
-                    # wrong; reopen the card only out of a state we had
-                    # already given up on (closed/unreachable) -- a card the
-                    # recruiter is actively working must not be yanked out
-                    # from under them just because the same person reapplied.
-                    if payload.is_response:
-                        await self._note_repeat_response(existing, payload, route)
-                    return IngestResult(
-                        accepted=True,
-                        duplicate=True,
+                    if not payload.is_response or await self._has_live_card(existing):
+                        # 07.09.2026: this used to return here in total silence --
+                        # a repeat robota.ua/work.ua response from someone we
+                        # already have a card for vanished with no trace (the
+                        # Таран Максим case). A recruiter who had already closed
+                        # or given up on a candidate had no way to learn they came
+                        # back, short of manually re-checking robota.ua by hand.
+                        # Comment always, since that costs nothing and is never
+                        # wrong; reopen the card only out of a state we had
+                        # already given up on (closed/unreachable) -- a card the
+                        # recruiter is actively working must not be yanked out
+                        # from under them just because the same person reapplied.
+                        if payload.is_response:
+                            await self._note_repeat_response(existing, payload, route)
+                        return IngestResult(
+                            accepted=True,
+                            duplicate=True,
+                            candidate_id=existing.id,
+                            keycrm_lead_id=existing.keycrm_lead_id,
+                            reason="local_duplicate",
+                        )
+                    # 24.09.2026: a response from someone we hold WITHOUT a card
+                    # -- ingested while deferral was on, found by cold sourcing
+                    # and still waiting for Єва, whose card creation failed, or
+                    # whose card a recruiter deleted -- used to take the return
+                    # above and never reach the CRM. Fall through to a new card.
+                    log.info(
+                        "ingest.repeat_response_card_missing",
                         candidate_id=existing.id,
-                        keycrm_lead_id=existing.keycrm_lead_id,
-                        reason="local_duplicate",
+                        old_lead_id=existing.keycrm_lead_id,
+                        status=existing.status,
                     )
+                    existing.keycrm_lead_id = None
+                    if existing.status in (CandidateStatus.CLOSED, CandidateStatus.UNREACHABLE):
+                        # A fresh card on a given-up row would be swept straight
+                        # back to «Не актуально» by the unreachable give-up job.
+                        existing.status = intake_status(route, payload)
                 # A card we already made is the one reliable duplicate signal we
                 # have: KeyCRM cannot filter cards by phone at all (that endpoint
                 # answers 400 — see find_lead_by_phone). But the id has to be
@@ -400,8 +435,10 @@ class InboundRouter:
         # Deferred mode: skip KeyCRM entirely at ingest. Orchestrator will
         # create the lead post-call when Єва has a qualified verdict. Only
         # applies where a call actually happens — for an intake-only vacancy
-        # deferring would mean the card is never created at all.
-        if route.calls_enabled and _defer_keycrm():
+        # deferring would mean the card is never created at all. The same goes
+        # for a response: since 04.09 Єва does not call people who applied
+        # themselves, so a deferred response card is a card that never comes.
+        if route.calls_enabled and not payload.is_response and _defer_keycrm():
             log.info(
                 "inbound.local_only",
                 candidate_id=new_candidate_id,
