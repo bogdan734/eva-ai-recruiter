@@ -1,16 +1,21 @@
 """Who is worth spending one of the account's paid contact openings on.
 
-The rule used to be written for the sales funnel alone: whitelisted oblast plus
-a sales/logistics job title. An intake-only vacancy was refused outright, on the
-reasoning that nobody would call those applicants so revealing a number bought
-nothing.
+2026-09-04 policy change (user-directed): every candidate who applied to a
+vacancy himself must reach the CRM, full stop -- age/region/role screening
+no longer decides who gets a card, only who Єва calls. `worth_opening()`
+used to re-run that same screening one step earlier, before we even had a
+phone number to attach a card to, which produced the same silent drop the
+policy change was meant to stop. The only thing left worth gating a paid
+open on is the vacancy's own on/off switch (`open_paid_contacts`) -- a
+recruiter's cost/feature toggle per vacancy, not a portrait match on the
+applicant.
 
-That reasoning does not survive contact with the client. On robota.ua most
-records arrive as `Interaction` with the phone hidden, so refusing to open them
-meant the bookkeeping vacancies produced almost no cards at all — which is what
-the client noticed and wrote in about. The openings are prepaid and expire on a
-date whether or not they are used, so the sales-shaped guards are the wrong
-question for a vacancy a human works by hand.
+2026-09-04 fix, same day: removing the region/role guards also removed the
+only thing that told `Interaction` records (robota.ua surfacing a view or an
+algorithmic recommendation -- not a response at all) apart from a genuine
+apply. `TestRefusesNonResponses` below covers that guard: it is not a
+portrait filter (no age/region/role), it is the "did this person actually
+apply" signal, which the policy change was never meant to remove.
 """
 import dataclasses
 
@@ -20,89 +25,139 @@ from src.common import vacancies
 from src.integrations.robotaua_sync import worth_opening
 
 
-def _apply(vacancy_id: int, speciality: str = "") -> dict:
-    return {"id": 1, "vacancyId": vacancy_id, "speciality": speciality, "cityId": 4}
+def _apply(vacancy_id: int, speciality: str = "", resume_type: str = "AttachedFile") -> dict:
+    # Default resume_type is a genuine-response type so every pre-existing
+    # test case below keeps meaning "a real apply" unless it says otherwise.
+    return {
+        "id": 1,
+        "vacancyId": vacancy_id,
+        "speciality": speciality,
+        "cityId": 4,
+        "resumeType": resume_type,
+    }
 
 
-def _first_id(key: str) -> int:
-    return sorted(vacancies.all_vacancies()[key].robotaua_ids)[0]
+def _replace(vac, **changes):
+    return dataclasses.replace(vac, **changes)
 
 
-class TestIntakeOnlyVacancy:
-    """A vacancy a recruiter works by hand carries its own portrait."""
+class TestOpensRegardlessOfPortrait:
+    """Region/role/title no longer gate a paid open -- only the switch (and
+    genuine-response check below) does."""
 
-    def test_opens_regardless_of_job_title(self, monkeypatch):
+    def test_opens_off_portrait_title(self, monkeypatch):
+        vac = vacancies.all_vacancies()["sales"]
+        monkeypatch.setattr(
+            vacancies,
+            "for_robotaua",
+            lambda _vid: _replace(vac, open_paid_contacts=True, screen_enabled=True),
+        )
+        # "перукар" (hairdresser) matches none of the sales ROLE_MARKERS --
+        # used to be refused, must now be opened anyway.
+        assert worth_opening(_apply(1, "перукар"), "Дніпропетровська") is True
+
+    def test_opens_without_a_region(self, monkeypatch):
+        vac = vacancies.all_vacancies()["sales"]
+        monkeypatch.setattr(
+            vacancies,
+            "for_robotaua",
+            lambda _vid: _replace(vac, open_paid_contacts=True, screen_enabled=True),
+        )
+        # No region info at all -- used to be a refusal, must now open anyway.
+        assert worth_opening(_apply(1, "менеджер з продажу"), None) is True
+
+    def test_opens_a_blocked_region(self, monkeypatch):
+        vac = vacancies.all_vacancies()["sales"]
+        monkeypatch.setattr(
+            vacancies,
+            "for_robotaua",
+            lambda _vid: _replace(vac, open_paid_contacts=True, screen_enabled=True),
+        )
+        # Kyiv is in regions_blocked -- irrelevant now, must still open.
+        assert worth_opening(_apply(1, "менеджер з продажу"), "Київська") is True
+
+    def test_opens_intake_only_vacancy_with_no_title_to_judge_by(self, monkeypatch):
+        """49 of the 175 parked records used to carry no speciality and were
+        refused outright. They must open too now -- nothing left to judge them
+        against except whether the vacancy wants paid opens and whether this
+        is a real apply."""
         vac = vacancies.all_vacancies()["accountant"]
         monkeypatch.setattr(
             vacancies, "for_robotaua", lambda _vid: _replace(vac, open_paid_contacts=True)
         )
-        # "бухгалтер" is in none of the sales ROLE_MARKERS, and that is the point.
-        assert worth_opening(_apply(1, "бухгалтер"), "Дніпропетровська") is True
+        assert worth_opening(_apply(1, "", resume_type="Notepad"), "Дніпропетровська") is True
 
-    def test_refuses_when_there_is_nothing_to_judge_by(self, monkeypatch):
-        """No title and no history means no opinion — and no opening.
 
-        Openings come from a fixed prepaid pool, so an unreadable record loses
-        to a legible one every time. 49 of the 175 parked records carry no
-        speciality; they stay visible in the robota.ua cabinet either way.
-        """
-        vac = vacancies.all_vacancies()["accountant"]
-        monkeypatch.setattr(
-            vacancies, "for_robotaua", lambda _vid: _replace(vac, open_paid_contacts=True)
-        )
-        assert worth_opening(_apply(1, ""), "Дніпропетровська") is False
+class TestVacancySwitchStillVetoes:
+    """A vacancy that opted out of paid opens is still refused."""
 
-    def test_opens_an_on_role_applicant(self, monkeypatch):
-        """Geo is not asked of a vacancy nobody dials — the title carries it."""
-        vac = vacancies.all_vacancies()["accountant"]
-        monkeypatch.setattr(
-            vacancies, "for_robotaua", lambda _vid: _replace(vac, open_paid_contacts=True)
-        )
-        assert worth_opening(_apply(1, "Бухгалтер первинної документації"), None) is True
-
-    def test_still_refuses_when_the_vacancy_says_no(self, monkeypatch):
-        """The per-vacancy switch stays the veto — nothing here overrides it."""
+    def test_refuses_when_the_vacancy_says_no(self, monkeypatch):
         vac = vacancies.all_vacancies()["accountant"]
         monkeypatch.setattr(
             vacancies, "for_robotaua", lambda _vid: _replace(vac, open_paid_contacts=False)
         )
         assert worth_opening(_apply(1, "бухгалтер"), "Дніпропетровська") is False
 
+    def test_refuses_when_the_sales_vacancy_says_no(self, monkeypatch):
+        vac = vacancies.all_vacancies()["sales"]
+        monkeypatch.setattr(
+            vacancies,
+            "for_robotaua",
+            lambda _vid: _replace(vac, open_paid_contacts=False, screen_enabled=True),
+        )
+        assert worth_opening(_apply(1, "менеджер з продажу"), "Дніпропетровська") is False
 
-class TestCalledVacancy:
-    """A vacancy Eva dials keeps the old guards: a burnt opening is a wasted call."""
 
-    def test_refuses_off_portrait_title(self, monkeypatch):
+class TestRefusesNonResponses:
+    """`Interaction` is robota.ua showing a view or a recommendation, not a
+    reply -- the ground-truth "did they actually apply" signal, which the
+    policy change never meant to remove. Regression coverage for the incident
+    where Клецко Ігор, Недоступ Олексій and Blanar Fedir (none of them
+    remotely sales/logistics) got their contacts opened and cards created
+    within minutes of the region/role guards being removed."""
+
+    def test_refuses_an_interaction_record_even_off_portrait(self, monkeypatch):
         vac = vacancies.all_vacancies()["sales"]
         monkeypatch.setattr(
             vacancies,
             "for_robotaua",
             lambda _vid: _replace(vac, open_paid_contacts=True, screen_enabled=True),
         )
-        assert worth_opening(_apply(1, "перукар"), "Дніпропетровська") is False
+        apply = _apply(1, "юрист, митний брокер", resume_type="Interaction")
+        assert worth_opening(apply, "Дніпропетровська") is False
 
-    def test_accepts_on_portrait_title(self, monkeypatch):
+    def test_refuses_an_interaction_record_with_no_region_either(self, monkeypatch):
         vac = vacancies.all_vacancies()["sales"]
         monkeypatch.setattr(
             vacancies,
             "for_robotaua",
             lambda _vid: _replace(vac, open_paid_contacts=True, screen_enabled=True),
         )
-        assert worth_opening(_apply(1, "менеджер з продажу"), "Дніпропетровська") is True
+        assert worth_opening(_apply(1, "", resume_type="Interaction"), None) is False
 
-    def test_refuses_without_a_region(self, monkeypatch):
-        """Unknown oblast on a dialled vacancy is still a refusal."""
+    @pytest.mark.parametrize("resume_type", ["AttachedFile", "Notepad"])
+    def test_still_opens_genuine_response_types(self, monkeypatch, resume_type):
         vac = vacancies.all_vacancies()["sales"]
         monkeypatch.setattr(
             vacancies,
             "for_robotaua",
             lambda _vid: _replace(vac, open_paid_contacts=True, screen_enabled=True),
         )
-        assert worth_opening(_apply(1, "менеджер з продажу"), None) is False
+        apply = _apply(1, "перукар", resume_type=resume_type)
+        assert worth_opening(apply, "Дніпропетровська") is True
 
-
-def _replace(vac, **changes):
-    return dataclasses.replace(vac, **changes)
+    def test_vacancy_switch_still_wins_over_a_genuine_response(self, monkeypatch):
+        """open_paid_contacts=False refuses even AttachedFile/Notepad -- the
+        switch and the response check are independent vetoes, either one
+        alone is enough to refuse."""
+        vac = vacancies.all_vacancies()["sales"]
+        monkeypatch.setattr(
+            vacancies,
+            "for_robotaua",
+            lambda _vid: _replace(vac, open_paid_contacts=False, screen_enabled=True),
+        )
+        apply = _apply(1, "менеджер з продажу", resume_type="AttachedFile")
+        assert worth_opening(apply, "Дніпропетровська") is False
 
 
 @pytest.mark.parametrize("key", ["sales", "accountant"])

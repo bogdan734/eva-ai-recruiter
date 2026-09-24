@@ -107,10 +107,13 @@ ACCOUNTANT = Vacancy(
     label="Бухгалтер",
     # Both accountant postings, per the client's 05.08 message. They resolve to
     # the same funnel; kept listed so routing is explicit if intake resumes.
-    #   8242731 / 11249166 — Бухгалтер (єдиний)
+    #   8242731 — Бухгалтер (єдиний)
     #   8374143 / 11292426 — Помічник бухгалтера, бухгалтер з первинної документації
+    #   2026-09-03: robota.ua id 11249166 was reused by the client for a
+    #   different posting («Менеджер з логістики та продажу транспортних послуг (Junior)»),
+    #   same URL/id, different role — moved to LOGISTICS_JR below.
     workua_ids=frozenset({8242731, 8374143}),
-    robotaua_ids=frozenset({11249166, 11292426}),
+    robotaua_ids=frozenset({11292426}),
     keycrm_pipeline_id=6,          # «Бухгалтер»
     keycrm_status_id=84,           # «Новий»
     calls_enabled=False,
@@ -133,7 +136,47 @@ ACCOUNTANT = Vacancy(
 
 # Shipped in code. The live registry is `all_vacancies()` — these are only the
 # starting point it merges panel edits over.
-SHIPPED: dict[str, Vacancy] = {v.key: v for v in (SALES, ACCOUNTANT)}
+LOGISTICS_JR = Vacancy(
+    key="logistics_jr",
+    # 07.09.2026: this used to be the posting's own descriptive title
+    # ("Менеджер з логістики та продажу транспортних послуг (Junior)"), which
+    # LOOKS like the right value but silently broke the card -- LD_1001
+    # «Вакансія» in KeyCRM is a fixed SELECT field (checked live: GET
+    # /custom-fields returns type=select for LD_1001), not free text. Any
+    # value that isn't one of its predefined options is dropped without an
+    # error -- create_lead()'s POST succeeds, the card is created, but the
+    # field just renders empty ("+ Додати"), which is exactly what six of this
+    # vacancy's eight cards looked like when checked live (11114, 11146,
+    # 11147, 11150, 11154, 11158). LOGISTICS_JR shares keycrm_pipeline_id=1
+    # with SALES ("1 Етап Менеджер з продажу"), and that pipeline's only valid
+    # select option is SALES.label -- confirmed by probing KeyCRM directly:
+    # setting LD_1001 to the old descriptive string on a real card was
+    # silently rejected (update returned no custom_fields, value unchanged),
+    # while "Менеджер з продажу" is what the sales cards already carry
+    # successfully. The specific posting still comes through loud and clear
+    # via LD_1002 (vacancy_number) and LD_1004 (vacancy_url) below -- those
+    # are free-text/link fields and were never affected.
+    label="Менеджер з продажу",
+    # 2026-09-03: robota.ua reused id 11249166 (previously «Бухгалтер
+    # (єдиний)», see ACCOUNTANT above) for this new posting — same url,
+    # different role. Dnipro, 25000-45000 грн. Same funnel/filter/role_markers
+    # as SALES (work.ua 8249916/8346465) for consistency — it is the same kind
+    # of role, just a separate robota.ua posting.
+    workua_ids=frozenset(),
+    robotaua_ids=frozenset({11249166}),
+    keycrm_pipeline_id=1,          # «1 Етап Менеджер з продажу» — same as SALES
+    keycrm_status_id=1,            # «Новий»
+    calls_enabled=True,
+    screen_enabled=True,
+    vacancy_number="11249166",
+    vacancy_url="https://robota.ua/company0/vacancy11249166",
+    open_paid_contacts=True,
+    role_markers=(
+        "логіст", "продаж", "менеджер", "sales", "logistic", "експедит", "закупів",
+    ),
+)
+
+SHIPPED: dict[str, Vacancy] = {v.key: v for v in (SALES, ACCOUNTANT, LOGISTICS_JR)}
 
 DEFAULT = SALES
 

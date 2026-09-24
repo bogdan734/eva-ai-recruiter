@@ -76,6 +76,21 @@ class IngestPayload:
     # a new number for the same job), so the card can only point at the right
     # one if the id travels with the applicant.
     board_vacancy_id: int | None = None
+    # When the applicant actually responded on the board (work.ua response
+    # date / robota.ua addDate) -- NOT when we happened to poll it in. Without
+    # this, every card looks equally 'new' regardless of whether the person
+    # applied today or two months ago, and the recruiter cannot tell a hot
+    # lead from a stale one. Reported by Svitlana 2026-09-03.
+    response_date: datetime | None = None
+    # 2026-09-04 policy change: True for anyone who applied/wrote to us
+    # themselves (work.ua/robota.ua response, robota.ua chat) as opposed to
+    # someone Єва is actively sourcing (workua_scraper, workua_search). A
+    # response candidate always gets a card and never enters the call
+    # queue -- recruiters triage responses by hand. Sourced candidates keep
+    # the old behaviour: the portrait filter decides whether they even get a
+    # card, because the only reason they exist in our system is for Єва to
+    # call them.
+    is_response: bool = False
 
 
 @dataclass
@@ -87,9 +102,41 @@ class IngestResult:
     duplicate: bool = False
 
 
+def screening_applies(route, payload: IngestPayload) -> bool:
+    """Should the region/name portrait gate run for this ingest?
+
+    2026-09-04 policy change: screening now decides only who Єва calls, never
+    who reaches the CRM. A self-applied candidate (payload.is_response) skips
+    it entirely regardless of the vacancy; a sourced candidate still needs
+    route.screen_enabled, exactly as before.
+    """
+    return bool(route.screen_enabled) and not payload.is_response
+
+
+def intake_status(route, payload: IngestPayload) -> CandidateStatus:
+    """Which status a freshly-ingested candidate starts at.
+
+    MANAGER_REVIEW keeps a candidate out of the dialer -- the dispatcher only
+    picks NEW_RESUME / IN_CALL_QUEUE, and the CRM stage sweep ignores this
+    status too. 2026-09-04: a self-applied candidate is ALWAYS parked here
+    regardless of calls_enabled -- Єва only dials people being actively
+    sourced, never someone who already applied/wrote in himself.
+    """
+    if payload.is_response:
+        return CandidateStatus.MANAGER_REVIEW
+    return CandidateStatus.NEW_RESUME if route.calls_enabled else CandidateStatus.MANAGER_REVIEW
+
+
 def _format_manager_comment(payload: IngestPayload, region: str | None) -> str:
     """Pack AI metadata into manager_comment (KeyCRM has no other free-form fields)."""
     bits: list[str] = []
+    # First and most visible -- KeyCRM has no native response-date field
+    # (checked 2026-09-03: none of the 12 lead custom fields is date-typed,
+    # and POST /custom-fields is not supported -- 405, field creation is
+    # UI-only). Until someone creates a real one, this is how a recruiter
+    # tells a same-day applicant from a two-month-old one.
+    if payload.response_date:
+        bits.append(f"📅 дата відгуку: {payload.response_date.strftime('%d.%m.%Y %H:%M')}")
     if region:
         bits.append(region)
     if payload.experience_years:
@@ -132,10 +179,70 @@ def merge_sources(existing: str | None, new: str | None, *, limit: int = SOURCE_
     return ",".join(tokens)
 
 
+# Sources where a repeat is a NEW event rather than a duplicate to fold into
+# the card we already have. A board response is the same person answering the
+# same posting again -- one card, annotated. A Google-Form application is a
+# fresh document the person filled in today, and the recruiter works each one
+# on its own card at «Новий» (her request, 23.09.2026).
+ALWAYS_NEW_CARD_SOURCES = frozenset({"googleform"})
+
+
 class InboundRouter:
     def __init__(self, keycrm: CRMClient | None = None) -> None:
         self._keycrm = keycrm or get_crm()
         self._settings = get_settings()
+
+    async def _note_repeat_response(
+        self, existing: Candidate, payload: "IngestPayload", route
+    ) -> None:
+        """Surface a repeat response on a card we already have, instead of the
+        local-duplicate return path swallowing it in silence (see the call
+        site's comment). Reactivation only fires from a terminal give-up
+        status -- CLOSED/UNREACHABLE -- because those are exactly the states
+        where a recruiter would otherwise never see the person again; an
+        actively-worked card is left exactly where it is, just annotated.
+        """
+        if not existing.keycrm_lead_id:
+            log.info(
+                "ingest.repeat_response_no_card",
+                candidate_id=existing.id,
+                status=existing.status,
+            )
+            return
+        when = (payload.response_date or datetime.utcnow()).strftime("%d.%m.%Y %H:%M")
+        note = f"🔁 повторний відгук {when} на «{route.label}» (джерело: {payload.source})"
+        try:
+            await self._keycrm.append_manager_comment(existing.keycrm_lead_id, note)
+        except Exception:
+            log.warning(
+                "ingest.repeat_response_comment_failed",
+                candidate_id=existing.id,
+                keycrm_lead_id=existing.keycrm_lead_id,
+            )
+            return
+        if existing.status in (CandidateStatus.CLOSED, CandidateStatus.UNREACHABLE):
+            log.info(
+                "ingest.repeat_response_reactivated",
+                candidate_id=existing.id,
+                from_status=existing.status,
+            )
+            existing.status = CandidateStatus.MANAGER_REVIEW
+            try:
+                await self._keycrm.move_to_status(
+                    existing.keycrm_lead_id, route.keycrm_status_id or STATUS_NEW
+                )
+            except Exception:
+                log.warning(
+                    "ingest.repeat_response_stage_move_failed",
+                    candidate_id=existing.id,
+                    keycrm_lead_id=existing.keycrm_lead_id,
+                )
+        else:
+            log.info(
+                "ingest.repeat_response_noted",
+                candidate_id=existing.id,
+                status=existing.status,
+            )
 
     async def ingest(self, payload: IngestPayload) -> IngestResult:
         route = vacancies.get(payload.vacancy_key)
@@ -157,11 +264,15 @@ class InboundRouter:
 
         region = normalize_region(payload.region_raw or "")
 
-        # Screening gates belong to the vacancies Єва actually calls. An
+        # Screening gates belong to the vacancies Єва actually calls, and only to
+        # candidates Єва is actively sourcing -- not to someone who applied
+        # himself. 2026-09-04: a self-applied candidate (is_response) always
+        # gets a card; region/name only decide whether Єва calls a SOURCED
+        # candidate, never whether a RESPONSE gets into the CRM at all. An
         # intake-only vacancy (e.g. «Бухгалтер») has its own geo and its own
         # portrait, and a human works the card — filtering here would silently
         # drop people the recruiter wants to see.
-        if route.screen_enabled:
+        if screening_applies(route, payload):
             if region and not is_region_allowed(
                 region, self._settings.regions_allowed, self._settings.regions_blocked
             ):
@@ -190,7 +301,31 @@ class InboundRouter:
                 # card lives in a DIFFERENT funnel worked by a different person,
                 # so having met this phone before must not stop us; fall through
                 # and let the per-funnel CRM check decide.
-                if route.calls_enabled:
+                if payload.source in ALWAYS_NEW_CARD_SOURCES:
+                    # Fall through to card creation below. The row is reused
+                    # (one human, one row); the CARD is new, carrying this
+                    # submission's own answers in resume_text and the manager
+                    # comment -- which the repeat-comment path silently dropped.
+                    log.info(
+                        "ingest.repeat_gets_own_card",
+                        candidate_id=existing.id,
+                        source=payload.source,
+                        existing_lead_id=existing.keycrm_lead_id,
+                    )
+                elif route.calls_enabled:
+                    # 07.09.2026: this used to return here in total silence --
+                    # a repeat robota.ua/work.ua response from someone we
+                    # already have a card for vanished with no trace (the
+                    # Таран Максим case). A recruiter who had already closed
+                    # or given up on a candidate had no way to learn they came
+                    # back, short of manually re-checking robota.ua by hand.
+                    # Comment always, since that costs nothing and is never
+                    # wrong; reopen the card only out of a state we had
+                    # already given up on (closed/unreachable) -- a card the
+                    # recruiter is actively working must not be yanked out
+                    # from under them just because the same person reapplied.
+                    if payload.is_response:
+                        await self._note_repeat_response(existing, payload, route)
                     return IngestResult(
                         accepted=True,
                         duplicate=True,
@@ -205,7 +340,7 @@ class InboundRouter:
                 # stale id used to mean "already handled" forever, which hid 21
                 # accountants from the funnel on 2026-08-05.
                 stale_lead_id = int(existing.keycrm_lead_id or 0)
-                if stale_lead_id:
+                if stale_lead_id and payload.source not in ALWAYS_NEW_CARD_SOURCES:
                     try:
                         pid = await self._keycrm.card_pipeline(stale_lead_id)
                     except Exception:
@@ -253,14 +388,9 @@ class InboundRouter:
                 # The routing decision the puller already made, persisted instead of
                 # discarded. `vacancy_id` is a constant and cannot carry it.
                 vacancy_key=payload.vacancy_key,
-                # MANAGER_REVIEW keeps intake-only candidates out of the dialer:
-                # the dispatcher only picks NEW_RESUME / IN_CALL_QUEUE, and the
-                # CRM stage sweep ignores this status too.
-                status=(
-                    CandidateStatus.NEW_RESUME
-                    if route.calls_enabled
-                    else CandidateStatus.MANAGER_REVIEW
-                ),
+                # See intake_status() above for the 2026-09-04 policy change:
+                # a self-applied candidate never enters the call queue.
+                status=intake_status(route, payload),
             )
             if candidate is not None:
                 session.add(candidate)
@@ -337,7 +467,11 @@ class InboundRouter:
                 manager_id=DEFAULT_MANAGER_ID,
                 # Intake-only cards must look like the sales funnel's: contact
                 # present but NOT saved as a client, so the recruiter chooses.
-                save_buyer=route.calls_enabled,
+                # 2026-09-03: recruiter wants every new contact to land
+                # UNSAVED regardless of vacancy -- she reviews and saves it
+                # herself. Used to be route.calls_enabled, which saved sales
+                # candidates automatically; that's exactly what she asked to stop.
+                save_buyer=False,
             )
             lead_id = int(created.get("id") or 0)
         except Exception as e:

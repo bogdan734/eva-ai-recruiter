@@ -24,9 +24,12 @@ def test_sales_manager_with_logistics_passes():
 
 
 def test_logist_in_whitelist_passes():
+    # Region deliberately one of the allowed oblasts: Вінницька moved to the
+    # blacklist in July, and this test is about the POSITION whitelist -- with
+    # the old region it was failing on geography and testing nothing.
     res = evaluate(
         full_name="Андрій Іванович",
-        region="Вінницька обл.",
+        region="Львівська обл.",
         desired_position="Логіст",
         last_position="Логіст міжнародних перевезень",
         birth_year=_yr(35),
@@ -202,6 +205,44 @@ def test_gender_detection_male():
 
 def test_gender_unknown():
     assert detect_gender_from_name(None) == Gender.UNKNOWN
+
+
+# ---------- Name-order robustness (2026-09-03: Балагура Віталій bug) ----------
+# work.ua's `fio` field is "Прізвище Ім'я" (surname first); other sources are
+# often "Ім'я Прізвище". The heuristic used to only look at word 0, so a
+# surname-first record scored the SURNAME as if it were the given name.
+
+
+def test_gender_surname_first_male():
+    """The reported bug: work.ua sent "Балагура Віталій" (a man), and reading
+    only word 0 ("Балагура", ends in -а) misclassified him as FEMALE."""
+    assert detect_gender_from_name("Балагура Віталій") == Gender.MALE
+
+
+def test_gender_surname_first_female():
+    """Same order problem, opposite genders: a "-ко" surname first must not
+    outvote a female given name that follows it."""
+    assert detect_gender_from_name("Шевченко Тетяна") == Gender.FEMALE
+
+
+def test_gender_given_name_first_with_ko_surname():
+    """Regression guard for the common case: given name first, "-ко" surname
+    after -- must still read as the given name's gender, not UNKNOWN."""
+    assert detect_gender_from_name("Ольга Ткаченко") == Gender.FEMALE
+    assert detect_gender_from_name("Андрій Ковальчук") == Gender.MALE
+
+
+def test_gender_patronymic_wins_regardless_of_order():
+    """По-батькові is the strongest, order-independent signal."""
+    assert detect_gender_from_name("Балагура Віталій Іванович") == Gender.MALE
+    assert detect_gender_from_name("Петренко Марія Іванівна") == Gender.FEMALE
+
+
+def test_gender_conflicting_weak_signals_returns_unknown():
+    """Two same-confidence, disagreeing signals (no patronymic, no strong
+    "-ій" word) shouldn't be resolved by a coin flip -- UNKNOWN, same as a
+    missing age falls back to the widest window instead of guessing."""
+    assert detect_gender_from_name("Соловйов Ганна") == Gender.UNKNOWN
 
 
 # ---------- New rules (2026-06-20 clarifications) ----------

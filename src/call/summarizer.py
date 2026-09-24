@@ -21,6 +21,22 @@ from src.common.settings import get_settings
 
 log = structlog.get_logger()
 
+
+def _system_prompt() -> str:
+    """The analyzer prompt with the region lists filled in from settings.
+
+    Hardcoding them here is what let this gate drift away from the intake
+    filter's REGION_WHITELIST: on 17.09.2026 a Дніпро candidate cleared intake,
+    was called, and was then marked «Не ЦА» by a list that had never been
+    updated. One source of truth, read at call time.
+    """
+    s = get_settings()
+    allowed = ", ".join(sorted(s.regions_allowed)) or "(не налаштовано)"
+    blocked = ", ".join(sorted(s.regions_blocked)) or "(не налаштовано)"
+    return _SYSTEM.replace("__ALLOWED_REGIONS__", allowed).replace(
+        "__BLOCKED_REGIONS__", blocked
+    )
+
 _SYSTEM = """You are a recruitment call analyzer.
 
 You receive a transcript of an outbound recruiter call (AI agent → candidate).
@@ -31,8 +47,8 @@ You must return ONLY a tool call to summarize_call with these fields:
   - language: uk | ru | en | mixed
   - qualified: true ONLY if ALL of these are known AND fit: (a) at least ~1 year
     real work experience in sales/logistics/client work, (b) a confirmed city in
-    one of these oblasts ONLY — Житомирська, Хмельницька, Тернопільська, Львівська, Івано-Франківська, Закарпатська, Чернівецька, Рівненська, Волинська, Черкаська, Одеська. Any other oblast does not fit, including
-    Kyiv city AND the whole Kyiv oblast, and Vinnytsia oblast.
+    one of these oblasts ONLY — __ALLOWED_REGIONS__. Any other oblast does not fit, including
+    __BLOCKED_REGIONS__.
     Do NOT reason about "right bank" or geography — use this list literally,
     (c) a stated age. If region OR age was never given, or the call
     ended before both were collected, qualified MUST be false — an incomplete
@@ -157,7 +173,7 @@ class Summarizer:
             model=self._model,
             max_tokens=600,
             system=[
-                {"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}
+                {"type": "text", "text": _system_prompt(), "cache_control": {"type": "ephemeral"}}
             ],
             tools=[_TOOL],
             tool_choice={"type": "tool", "name": "summarize_call"},

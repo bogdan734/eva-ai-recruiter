@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from datetime import UTC, date, timedelta
+from datetime import UTC, date, datetime, time as dtime, timedelta
 
 from sqlalchemy import func, select
 
@@ -29,6 +29,20 @@ SOURCE_LABELS: dict[str, str] = {
     "manual": "ручний імпорт",
     "tg_test_call": "тестові",
 }
+
+
+# candidates.source is a CSV of every channel a person ever arrived through, so
+# one row can legitimately match several of these. The report says so out loud
+# rather than pretending the numbers add up to the day's total.
+_INTAKE_KINDS: tuple[tuple[str, str], ...] = (
+    ("workua_response_send", "work.ua · надіслав резюме"),
+    ("workua_response_phonecall", "work.ua · телефонував"),
+    ("workua_search", "work.ua · знайшла Єва"),
+    ("robotaua_response", "robota.ua · відгук"),
+    ("robotaua_chat", "robota.ua · чат"),
+    ("googleform", "анкета з форми"),
+    ("telegram", "Telegram"),
+)
 
 
 def source_label(raw: str | None) -> str:
@@ -51,6 +65,10 @@ class DayReport:
     total_in_line_sec: int = 0
     cost: dict[str, float] = field(default_factory=dict)
     intake_by_source: dict[str, int] = field(default_factory=dict)
+    # Finer than intake_by_source, which collapses everything work.ua into one
+    # label. This is the line that answers "чому на сайті десять, а в нас
+    # п'ятнадцять" without anybody re-counting the cabinet by hand.
+    intake_by_kind: dict[str, int] = field(default_factory=dict)
     tg_sent_today: int = 0
     tg_limit: int = 0
     tg_active: bool = False
@@ -59,8 +77,13 @@ class DayReport:
     funnel_manager: int = 0
     funnel_rejected: int = 0
     funnel_unreachable: int = 0
+    # Candidates rolled over to tomorrow's slots. Assigned in collect_for() and
+    # read by format_report_md(); it was never declared here, so any other way
+    # of building a report crashed the formatter.
+    carried_over: int = 0
     qualified_names: list[str] = field(default_factory=list)
     robotaua_block: str = ""
+    workua_session_block: str = ""
     workua_postings_block: str = ""
     balances_block: str = ""
     backup_block: str = ""
@@ -90,8 +113,25 @@ async def _tg_stats() -> tuple[int, int, bool]:
 TALK_FLOOR_SEC = 60  # below this nobody actually answered the screening questions
 
 
+def _kyiv_day_bounds(target: date) -> tuple[datetime, datetime]:
+    """[start, end) of a Kyiv calendar day, as UTC-aware timestamps.
+
+    The report is read in Kyiv; the database stores UTC. Comparing on
+    `func.date()` silently used the UTC day and moved everything before 03:00
+    Kyiv into yesterday.
+    """
+    from zoneinfo import ZoneInfo
+
+    from src.common.settings import get_settings
+
+    tz = ZoneInfo(get_settings().app_timezone)
+    start_local = datetime.combine(target, dtime.min, tzinfo=tz)
+    return start_local, start_local + timedelta(days=1)
+
+
 async def collect_for(target: date) -> DayReport:
     rep = DayReport(target_date=target)
+    _day_start, _day_end = _kyiv_day_bounds(target)
 
     async with session_scope() as session:
         # ---- calls of the day, aggregated per person ----
@@ -105,7 +145,7 @@ async def collect_for(target: date) -> DayReport:
                 func.sum(Call.tokens_output),
                 func.max(Call.status),
             )
-            .where(func.date(Call.started_at) == target)
+            .where(Call.started_at >= _day_start, Call.started_at < _day_end)
             .group_by(Call.candidate_id)
         )).all()
 
@@ -155,12 +195,15 @@ async def collect_for(target: date) -> DayReport:
         # ---- intake of the day, split by source ----
         intake = (await session.execute(
             select(Candidate.source, func.count(Candidate.id))
-            .where(func.date(Candidate.created_at) == target)
+            .where(Candidate.created_at >= _day_start, Candidate.created_at < _day_end)
             .group_by(Candidate.source)
         )).all()
         for raw, n in intake:
             label = source_label(raw)
             rep.intake_by_source[label] = rep.intake_by_source.get(label, 0) + n
+            for marker, kind in _INTAKE_KINDS:
+                if marker in (raw or ""):
+                    rep.intake_by_kind[kind] = rep.intake_by_kind.get(kind, 0) + n
 
         # ---- funnel snapshot (current, not per-day) ----
         funnel = dict((s, n) for s, n in (await session.execute(
@@ -180,7 +223,8 @@ async def collect_for(target: date) -> DayReport:
             .select_from(Candidate)
             .join(Call, Call.candidate_id == Candidate.id)
             .where(
-                func.date(Call.started_at) == target,
+                Call.started_at >= _day_start,
+                Call.started_at < _day_end,
                 Candidate.status.in_((
                     CandidateStatus.IN_CALL_QUEUE,
                     CandidateStatus.NEW_RESUME,
@@ -201,7 +245,8 @@ async def collect_for(target: date) -> DayReport:
     }
     rep.cost["total"] = round(sum(rep.cost.values()), 2)
     rep.robotaua_block = _robotaua_report_block()
-    rep.workua_postings_block = _workua_postings_block()
+    rep.workua_session_block = _workua_session_block()
+    rep.workua_postings_block = await _workua_postings_block()
     rep.backup_block = _backup_block()
     rep.balances_block = await _balances_block()
 
@@ -209,17 +254,68 @@ async def collect_for(target: date) -> DayReport:
     return rep
 
 
-def _workua_postings_block() -> str:
+async def _workua_postings_block() -> str:
     """Whether work.ua still carries the postings we recruit for.
 
     Reads the liveness poller's snapshot — no request of its own. Prints nothing
     while every posting is up, so the day it appears it means something.
+
+    2026-09-05: a "starved" verdict here can be stale (see workua_liveness's
+    merge_states -- an UNKNOWN probe, e.g. a Cloudflare 403, can never correct
+    an old REMOVED). Before repeating a stale alarm, check for real intake in
+    the last 3 days for that same vacancy: an actual candidate response is
+    ground truth no probe can override.
     """
     try:
-        from src.integrations.workua_liveness import report_block
-        return report_block()
+        from src.integrations.workua_liveness import report_block, _load_state
+        state = _load_state()
+        recent_keys = await _recent_workua_intake_keys(days=3)
+        text = report_block(state, suppress_keys=recent_keys)
+        return text
     except Exception:
         return ""
+
+
+async def _recent_workua_intake_keys(days: int = 3) -> set[str]:
+    """vacancy_key values that received a genuine work.ua response recently.
+
+    Used to catch a liveness false-positive before it repeats in the report:
+    a vacancy cannot be "жодного оголошення" if it is still receiving people.
+    """
+    from datetime import datetime, timedelta
+
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    async with session_scope() as session:
+        rows = (await session.execute(
+            select(Candidate.vacancy_key)
+            .where(
+                Candidate.created_at >= cutoff,
+                Candidate.source.like("workua%"),
+            )
+            .distinct()
+        )).all()
+    return {r[0] for r in rows if r[0]}
+
+
+def _first_future_stamp(*stamps: object) -> object | None:
+    """The first of these ISO timestamps that has not passed yet, if any.
+
+    A spent pause left in the report reads as "robota.ua is blocked right now"
+    -- the report said "пауза до 14:37 UTC" at 15:30 UTC on 09.09.2026 and cost
+    someone a round of investigating a block that had already cleared.
+    """
+    from datetime import datetime
+
+    now = datetime.utcnow()
+    for raw in stamps:
+        if not raw:
+            continue
+        try:
+            if datetime.fromisoformat(str(raw)) > now:
+                return raw
+        except ValueError:
+            continue
+    return None
 
 
 def _robotaua_report_block() -> str:
@@ -241,17 +337,119 @@ def _robotaua_report_block() -> str:
         "",
         "🔍 *robota.ua*",
         f"├ Черга на відкриття контактів: {s.get('pending', '—')}",
-        f"├ Квота відкриттів: {quota if quota is not None else '—'}"
-        f" (відкрито {s.get('contacts_opened_total', 0)},"
-        f" сховали номер {s.get('phones_hidden_total', 0)})",
+        f"├ Квота відкриттів на сьогодні: {quota if quota is not None else '—'}"
+        f" (відкрито всього за весь час: {s.get('contacts_opened_total', 0)},"
+        f" сховали номер: {s.get('phones_hidden_total', 0)})",
         f"└ Чат: чекають обробки {s.get('chat_todo', 0)}"
         f" (непрочитаних усього {s.get('chat_unread', 0)}),"
         f" відповідей Єви сьогодні {s.get('chat_replies_today', 0)}",
     ]
-    blocked = s.get("responses_blocked_until") or s.get("chat_blocked_until")
+    blocked = _first_future_stamp(
+        s.get("responses_blocked_until"), s.get("chat_blocked_until")
+    )
     if blocked:
         lines.append(f"  ⏳ Cloudflare пауза до {str(blocked)[11:16]} UTC")
     return "\n".join(lines) + "\n"
+
+
+def _cold_sourcing_last_run_line() -> str:
+    """What the last cold-sourcing run actually ran into.
+
+    Zero candidates because work.ua served its bot-check and zero candidates
+    because nobody matched look identical in every other number on this report;
+    this is the line that tells them apart.
+    """
+    import json
+    from datetime import datetime
+    from pathlib import Path
+
+    from src.common.settings import get_settings
+
+    try:
+        path = Path(get_settings().workua_session_state_path).parent / "workua_cold_sourcing.json"
+        if not path.exists():
+            return "└ ще не запускався\n"
+        d = json.loads(path.read_text(encoding="utf-8"))
+        when = datetime.utcfromtimestamp(float(d.get("at") or 0)).strftime("%d.%m %H:%M")
+        outcome = d.get("outcome")
+        if outcome == "challenged":
+            return f"└ ⛔️ {when} UTC: work.ua показав бот-перевірку — потрібен проксі\n"
+        if outcome == "no_session":
+            return f"└ ⚠️ {when} UTC: не було сесії, пошук пропущено\n"
+        if outcome == "logged_out":
+            return f"└ ⚠️ {when} UTC: браузерна сесія розлогінилась\n"
+        return (
+            f"└ {when} UTC: переглянуто {d.get('urls_found', 0)} резюме по наших містах, "
+            f"пройшли відбір {d.get('after_region_filter', 0)}, "
+            f"відкрито контактів {d.get('with_phone', 0)}\n"
+        )
+    except Exception:
+        return ""
+
+
+def _workua_session_block() -> str:
+    """Whether cold sourcing still has a usable work.ua login.
+
+    Reads the saved session file only -- no request of its own. work.ua's `wsid`
+    is a sliding ~30-minute window kept alive by the keepalive job; when that
+    window closes (host challenged, container down, nobody exported yet) cold
+    sourcing silently no-ops, and a silent no-op is indistinguishable in this
+    report from a day when nobody matched. So it says so out loud instead.
+    """
+    import json
+    import time
+    from pathlib import Path
+
+    from src.common.settings import get_settings
+
+    try:
+        s = get_settings()
+        path = Path(s.workua_session_state_path)
+        if not path.exists():
+            return (
+                "\n🔎 *Холодний пошук work.ua*\n"
+                "└ ❌ немає збереженої сесії — Єва не може шукати резюме\n"
+            )
+        # Cold sourcing goes through work.ua's API (employer login over HTTPS
+        # Basic), not this browser session -- so a dead session is a lost
+        # fallback, not a stopped search, and the report must not imply
+        # otherwise. On 18.09 a run opened 10 contacts and ingested 5 candidates
+        # with this very session signed out.
+        via_api = getattr(s, "workua_cold_sourcing_use_api", False)
+        head = "\n🔎 *Холодний пошук work.ua*\n"
+
+        # The keepalive's own verdict beats anything inferable from the cookie
+        # file: it refreshes `wsid`'s expiry on every beat, so a fresh timestamp
+        # only proves a beat happened, not that work.ua still knows us.
+        health_path = path.parent / "workua_session_health.json"
+        verdict = None
+        if health_path.exists():
+            try:
+                verdict = (json.loads(health_path.read_text(encoding="utf-8")) or {}).get("outcome")
+            except Exception:  # noqa: BLE001 — fall back to the cookie check
+                verdict = None
+
+        if verdict == "logged_out":
+            line = "└ ⚠️ браузерна сесія розлогінилась — потрібен новий експорт cookies\n"
+            return head + (
+                ("├ ✅ пошук працює через API work.ua\n" + line.replace("└", "├") + _cold_sourcing_last_run_line())
+                if via_api else line
+            )
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        cookies = data.get("cookies") or []
+        wsid = next((c for c in cookies if c.get("name") == "wsid"), None)
+        if not wsid:
+            return head + "└ ⚠️ у сесії немає ключового cookie (wsid) — потрібен новий експорт\n"
+        left_min = (float(wsid.get("expires") or 0) - time.time()) / 60
+        if left_min <= 0:
+            return head + "└ ❌ сесія протухла — потрібен новий експорт cookies (Cookie-Editor)\n"
+        alive = f"├ ✅ сесія жива (ще ~{int(left_min)} хв, продовжується автоматично)\n"
+        if via_api:
+            alive = "├ ✅ пошук працює через API work.ua\n" + alive
+        return head + alive + _cold_sourcing_last_run_line()
+    except Exception:
+        return ""
 
 
 def _backup_block() -> str:
@@ -349,6 +547,13 @@ def format_report_md(rep: DayReport) -> str:
         head, _, last = intake_lines.rpartition("├")
         intake_lines = head + "└" + last
 
+    kind_lines = ""
+    if rep.intake_by_kind:
+        rows = "\n".join(
+            f"│    {k}: {v}" for k, v in sorted(rep.intake_by_kind.items(), key=lambda x: -x[1])
+        )
+        kind_lines = f"\n│  за типом взаємодії:\n{rows}"
+
     total_intake = sum(rep.intake_by_source.values())
     c = rep.cost
     total = c.get("total", 0.0)
@@ -367,11 +572,15 @@ def format_report_md(rep: DayReport) -> str:
         f"📞 *Обдзвін* (людей, не спроб)\n"
         f"├ Набирали: {rep.people_dialed} осіб ({rep.attempts} спроб)\n"
         f"├ 💬 Поговорили: {rep.people_talked} ({pct(rep.people_talked)})\n"
+        f"├ ⚠️ Кинули на початку: {rep.dropped_early}\n"
+        f"└ 🔌 Не з'єдналось: {rep.not_connected}\n"
+        f"\n"
+        f"📌 *Поточний статус тих, кого сьогодні набирали*\n"
+        f"│ (не завжди результат сьогоднішньої розмови — статус міг змінитися\n"
+        f"│  й з іншої причини, напр. людина сама залишила новий відгук)\n"
         f"├ ⭐ Кваліфіковано: {rep.qualified}\n"
         f"├ 🚫 Не підійшли: {rep.rejected}\n"
-        f"├ ⚠️ Кинули на початку: {rep.dropped_early}\n"
-        f"├ ❌ Не додзвонились: {rep.unreachable}\n"
-        f"└ 🔌 Не з'єдналось: {rep.not_connected}\n"
+        f"└ ❌ Не додзвонились: {rep.unreachable}\n"
         f"\n"
         f"⏱ *Час*\n"
         f"├ Сер. розмова: {_fmt_duration(rep.avg_talk_sec)}\n"
@@ -383,7 +592,9 @@ def format_report_md(rep: DayReport) -> str:
         f"\n"
         f"📥 *Нові кандидати: {total_intake}*\n"
         f"{intake_lines}\n"
+        f"{kind_lines}\n"
         f"{rep.robotaua_block}"
+        f"{rep.workua_session_block}"
         f"{rep.workua_postings_block}"
         f"\n"
         f"💰 *Витрати*\n"

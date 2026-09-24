@@ -16,7 +16,8 @@ log = structlog.get_logger()
 
 
 class VapiClient:
-    def __init__(self, token: str | None = None, base_url: str = "https://api.vapi.ai") -> None:
+    def __init__(self, token: str | None = None, base_url: str | None = None) -> None:
+        base_url = base_url or get_settings().vapi_base_url
         s = get_settings()
         self._token = token or s.vapi_api_key
         self._client = httpx.AsyncClient(

@@ -14,11 +14,30 @@ from src.scraper.workua import ResumeListing
 log = structlog.get_logger()
 
 
+def build_candidate_text(listing: ResumeListing) -> str:
+    """How a candidate is described to the matcher.
+
+    Shared with cold sourcing's pre-check so the two cannot disagree: the
+    pre-check decides whether to spend a paid contact open, and this decides
+    whether that was worth it. Different wording there meant paying for people
+    this step then discarded (10.09.2026).
+    """
+    return (
+        f"{listing.full_name or ''}\n"
+        f"Бажана посада: {listing.desired_position or ''}\n"
+        f"Регіон: {listing.region or ''}\n"
+        f"Досвід: {listing.experience_years or 0} років\n"
+        f"Мови: {', '.join(listing.languages)}\n"
+    )
+
+
 async def feed_resumes_to_pipeline(
     listings: Sequence[ResumeListing],
     *,
     vacancy_id: int,
     vacancy_text: str,
+    vacancy_key: str | None = None,
+    source: str = "workua_search",
     scorer: MatchScorer | None = None,
     router: InboundRouter | None = None,
     score_threshold: float = 0.65,
@@ -61,13 +80,7 @@ async def feed_resumes_to_pipeline(
             stats["profile_rejected"] += 1
             continue
 
-        candidate_text = (
-            f"{listing.full_name or ''}\n"
-            f"Бажана посада: {listing.desired_position or ''}\n"
-            f"Регіон: {listing.region or ''}\n"
-            f"Досвід: {listing.experience_years or 0} років\n"
-            f"Мови: {', '.join(listing.languages)}\n"
-        )
+        candidate_text = build_candidate_text(listing)
         try:
             score = await scorer.score(vacancy_text, candidate_text)
         except Exception as e:
@@ -76,24 +89,37 @@ async def feed_resumes_to_pipeline(
             continue
 
         if score.score < score_threshold:
+            # Logged with the number: a run where everyone scores 0.63 is a
+            # threshold conversation, one where everyone scores 0.2 is not.
+            log.info(
+                "match.below_threshold",
+                score=round(float(score.score), 3),
+                threshold=score_threshold,
+                position=listing.desired_position,
+                url=listing.work_ua_url,
+            )
             stats["rejected"] += 1
             continue
         stats["matched"] += 1
 
-        result = await router.ingest(
-            IngestPayload(
-                full_name=listing.full_name or "Без імені",
-                phone_raw=listing.phone_e164,
-                region_raw=listing.region,
-                desired_position=listing.desired_position,
-                experience_years=listing.experience_years,
-                languages=listing.languages,
-                work_ua_url=listing.work_ua_url,
-                source="workua_scraper",
-                match_score=score.score,
-                vacancy_id=vacancy_id,
-            )
+        payload_kwargs = dict(
+            full_name=listing.full_name or "Без імені",
+            phone_raw=listing.phone_e164,
+            region_raw=listing.region,
+            desired_position=listing.desired_position,
+            experience_years=listing.experience_years,
+            languages=listing.languages,
+            work_ua_url=listing.work_ua_url,
+            source=source,
+            match_score=score.score,
+            vacancy_id=vacancy_id,
+            # Cold-sourced: nobody applied anywhere, this is Єва reaching out.
+            # Never a "response" -- see IngestPayload.is_response's own docstring.
+            is_response=False,
         )
+        if vacancy_key:
+            payload_kwargs["vacancy_key"] = vacancy_key
+        result = await router.ingest(IngestPayload(**payload_kwargs))
         if not result.accepted:
             stats["rejected"] += 1
         elif result.duplicate:

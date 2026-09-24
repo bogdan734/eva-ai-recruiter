@@ -62,7 +62,6 @@ from src.integrations.robotaua_api import (
 )
 from src.common import vacancies
 from src.integrations.robotaua_sync import allowed_vacancy_ids
-from src.match.profile_filter import evaluate as profile_evaluate
 
 log = structlog.get_logger()
 
@@ -209,7 +208,12 @@ async def poll_chats(
         return stats
 
     cursor = load_cursor()
+    from src.integrations.robotaua_api import blocked_until as _shared_block
+    _shared = _shared_block()
     blocked_until = parse_add_date(cursor.get("blocked_until"))
+    if _shared and (not blocked_until or _shared > blocked_until):
+        blocked_until = _shared
+        cursor["blocked_until"] = _shared.isoformat(timespec="seconds")
     if blocked_until and datetime.utcnow() < blocked_until:
         log.info("robotaua_chat.cooldown", until=cursor.get("blocked_until"))
         write_status(chat_blocked_until=cursor.get("blocked_until"))
@@ -373,29 +377,11 @@ async def poll_chats(
             birth_year = None
 
         transcript = transcript_of(messages)
-        # A chat thread is a few lines, not a CV, so the role check has nothing to
-        # bite on and would reject people who literally applied to this vacancy.
-        # The position they applied for IS the vacancy — say so, and let the geo
-        # and age gates do the filtering. Єва re-screens everything on the call.
-        profile = profile_evaluate(
-            full_name=name,
-            region=(geo or {}).get("region"),
-            desired_position=cv.get("speciality") or get_settings().keycrm_vacancy_label,
-            resume_text=transcript,
-            experience_text=transcript,
-            birth_year=birth_year,
-        )
-        if not profile.accepted:
-            stats.profile_rejected += 1
-            log.info(
-                "robotaua_chat.profile_rejected",
-                conversation=conv_id,
-                name=name,
-                reason=profile.reason,
-            )
-            entry["ingested"] = True  # decided — no need to look again
-            handled[conv_id] = entry
-            continue
+        # 2026-09-04 policy change: someone who wrote to us himself in the
+        # robota.ua chat always gets a card -- age/region/role no longer gate
+        # intake, only whether Єва calls (see IngestPayload.is_response /
+        # InboundRouter.ingest). The portrait filter used to run here and
+        # silently drop the applicant before router.ingest() ever saw them.
 
         if dry_run:
             stats.samples.append(f"{name} | {phone} | {(geo or {}).get('city')} | {len(messages)} msgs")
@@ -418,6 +404,7 @@ async def poll_chats(
                 vacancy_key=(
                     vacancies.for_robotaua(vacancy_id) or vacancies.DEFAULT
                 ).key,
+                is_response=True,
             )
         )
         if not result.accepted:
@@ -545,4 +532,8 @@ def _cooldown(cursor: dict) -> None:
         datetime.utcnow() + timedelta(minutes=minutes)
     ).isoformat(timespec="seconds")
     save_cursor(cursor)
+    # The responses poller has to sit out this block as well: Cloudflare
+    # flagged the address, and it does not care which endpoint we asked for.
+    from src.integrations.robotaua_api import note_block
+    note_block(minutes, who="chat")
     log.warning("robotaua_chat.cooldown_started", minutes=minutes)

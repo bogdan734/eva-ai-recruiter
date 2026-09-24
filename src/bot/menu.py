@@ -621,9 +621,19 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return await edit(txt, InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="nav:main")]]))
     if data == "act:report":
         from datetime import date
-        from src.bot.report import format_report_md, collect_for as _c
+        from src.bot.report import format_report_md, markdown_safe, collect_for as _c
         rep = await _c(date.today())
-        await q.message.reply_text(format_report_md(rep), parse_mode=ParseMode.MARKDOWN)
+        # 2026-09-05 fix: same bug as /today in src/bot/main.py -- sending the
+        # raw report under Markdown parse mode let one unpaired `_`/`*` (a
+        # candidate name, a resume snippet, "job_id" in a postings warning)
+        # make Telegram answer 400 and the button looked like it did nothing.
+        text = markdown_safe(format_report_md(rep))
+        try:
+            await q.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            import structlog
+            structlog.get_logger().warning("menu.report_button.send_failed", error=str(e))
+            await q.message.reply_text(text)
         return
 
     # edit text-fields (criteria + vacancy)
@@ -697,6 +707,48 @@ def _call_card(cfg: dict[str, Any]) -> str:
     )
 
 
+async def _ensure_candidate_for_call(
+    *, phone: str, name: str, position: str | None, region: str | None
+) -> int:
+    """The person on the other end, as a row Єва's pipeline can finish.
+
+    A call placed straight at Vapi leaves the end-of-call report with nothing to
+    attach to (`orchestrator.unknown_call`), so the summary, the status and the
+    CRM card never happen — which is exactly how a perfectly good screening call
+    vanished on 17.09.2026. Reuses an existing candidate when the number is
+    already known, so a test dial cannot duplicate someone.
+
+    Deliberately not routed through InboundRouter's portrait screening: the
+    operator chose this number by hand, and a filter second-guessing that would
+    mean the call happens and the result is discarded anyway.
+    """
+    from sqlalchemy import select
+
+    from src.common.db import session_scope
+    from src.common.models import Candidate, CandidateStatus
+
+    async with session_scope() as session:
+        existing = (
+            await session.execute(select(Candidate).where(Candidate.phone_e164 == phone))
+        ).scalar_one_or_none()
+        if existing:
+            existing.status = CandidateStatus.IN_CALL_QUEUE
+            await session.flush()
+            return existing.id
+        candidate = Candidate(
+            full_name=name,
+            phone_e164=phone,
+            desired_position=position,
+            region=region,
+            source="tg_manual_call",
+            status=CandidateStatus.IN_CALL_QUEUE,
+            vacancy_key="sales",
+        )
+        session.add(candidate)
+        await session.flush()
+        return candidate.id
+
+
 async def _place_call(update: Update, ctx: ContextTypes.DEFAULT_TYPE, q) -> None:
     cfg = ctx.user_data.get("call", {})
     phone = cfg.get("phone")
@@ -705,6 +757,45 @@ async def _place_call(update: Update, ctx: ContextTypes.DEFAULT_TYPE, q) -> None
         return
     from src.call.script_template import render_system_prompt
     from src.call.vapi_client import VapiClient
+
+    named = bool(cfg.get("name"))
+    if named:
+        # A named person is a real candidate: run the whole pipeline so the card
+        # follows the conversation, which is what anyone testing this expects.
+        from src.call.orchestrator import CallOrchestrator
+
+        try:
+            candidate_id = await _ensure_candidate_for_call(
+                phone=phone,
+                name=cfg["name"],
+                position=cfg.get("position"),
+                region=cfg.get("region"),
+            )
+            call = await CallOrchestrator().dispatch_for_candidate(candidate_id)
+        except Exception as e:
+            await q.edit_message_text(
+                f"❌ Помилка: <code>{type(e).__name__}: {str(e)[:250]}</code>",
+                reply_markup=_main_kb(), parse_mode=ParseMode.HTML,
+            )
+            ctx.user_data.pop("call", None)
+            ctx.user_data.pop("await", None)
+            return
+        if not call:
+            await q.edit_message_text(
+                "❌ Дзвінок не вдалося поставити (див. логи).",
+                reply_markup=_main_kb(), parse_mode=ParseMode.HTML,
+            )
+        else:
+            await q.edit_message_text(
+                f"📞 Дзвінок пішов!\ncall_id: <code>{call.get('id', '?')}</code>\n"
+                f"номер: <code>{phone}</code>\nкандидат: <b>{cfg['name']}</b>\n\n"
+                "Це повноцінний дзвінок: після розмови Єва зробить підсумок і, "
+                "якщо кандидат підходить, картка з'явиться в CRM.",
+                reply_markup=_main_kb(), parse_mode=ParseMode.HTML,
+            )
+        ctx.user_data.pop("call", None)
+        ctx.user_data.pop("await", None)
+        return
 
     name = cfg.get("name") or "невідомий (тестовий дзвінок)"
     position = cfg.get("position") or "невідомо (запитати у кандидата)"
@@ -730,7 +821,9 @@ async def _place_call(update: Update, ctx: ContextTypes.DEFAULT_TYPE, q) -> None
         cid = res.get("id", "?")
         await q.edit_message_text(
             f"📞 Дзвінок пішов!\ncall_id: <code>{cid}</code>\nномер: <code>{phone}</code>\n"
-            f"кандидат: <b>{name}</b> / {position} / {region}",
+            f"кандидат: <b>{name}</b> / {position} / {region}\n\n"
+            "⚠️ Це перевірка лінії: картка в CRM НЕ створюється. "
+            "Щоб дзвінок пішов як справжній і потрапив у CRM — вкажіть ім'я кандидата.",
             reply_markup=_main_kb(), parse_mode=ParseMode.HTML,
         )
     except Exception as e:

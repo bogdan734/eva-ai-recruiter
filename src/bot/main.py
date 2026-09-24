@@ -32,13 +32,27 @@ async def _cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     from datetime import date
 
     rep = await _collect_for_date(date.today())
-    text = format_report_md(rep)
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    # 2026-09-05 fix: this used to send the raw report under Markdown parse
+    # mode with no escaping -- exactly the bug that silently swallowed the
+    # 2026-08-22 09:00 digest (an unpaired `_` in `job_id` etc. makes Telegram
+    # answer 400 and drop the message). _send_daily() already guards against
+    # this; /today and /yesterday and the "📋 Звіт" button did not.
+    text = markdown_safe(format_report_md(rep))
+    try:
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        log.warning("cmd_today.send_failed error=%s", e)
+        await update.message.reply_text(text)
 
 
 async def _cmd_yesterday(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    text = await yesterdays_report()
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    # 2026-09-05 fix: same unescaped-Markdown bug as /today, see there.
+    text = markdown_safe(await yesterdays_report())
+    try:
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        log.warning("cmd_yesterday.send_failed error=%s", e)
+        await update.message.reply_text(text)
 
 
 async def _cmd_queue(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

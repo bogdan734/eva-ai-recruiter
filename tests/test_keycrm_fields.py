@@ -38,15 +38,21 @@ def test_field_map_has_all_24_keys():
     assert set(FIELD_MAP.keys()) == expected_keys
 
 
-def test_stage_map_has_all_9_stages():
+def test_stage_map_covers_every_status_we_write():
+    """Every local status must map to a CRM stage -- a missing key means cards
+    silently stop moving. Grew from 9 to 12 when the closing reasons were split
+    (не актуально / не підходить нам / не ЦА) instead of one generic «closed»."""
     assert set(STAGE_MAP.keys()) == {
         "new_resume",
         "filtered",
         "in_call_queue",
         "calling",
-        "unreachable",
         "call_done",
         "manager_review",
+        "unreachable",
+        "not_actual",
+        "we_rejected",
+        "not_target",
         "interview_scheduled",
         "closed",
     }

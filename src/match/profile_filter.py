@@ -306,17 +306,68 @@ def check_recent_role(
     return False, diag
 
 
+def _gender_word_signal(word: str) -> tuple[Gender, int]:
+    """Gender guess for ONE word, plus a confidence tier (2=strong, 1=weak, 0=none).
+
+    Split out of detect_gender_from_name() so every word of a name can be
+    scored, not just the first -- see that function for why.
+    """
+    # Common Ukrainian surname suffixes (Шевченко, Ковальчук, Мельник...) --
+    # they carry no personal-gender information and must not be read as a
+    # male given name. Left in the old single-word check, this is exactly
+    # what made a "Прізвище Ім'я" record misfire whenever the surname came
+    # first: the surname's own "-ко"/"-ук"/"-юк" outvoted the real name.
+    if word.endswith(("ко", "ук", "юк")):
+        return Gender.UNKNOWN, 0
+    # "-ій"/"-ий" is effectively given-name-only in practice (Віталій,
+    # Андрій, Юрій, Сергій, Валерій...), so it can outweigh a same-name
+    # word that only weakly suggests the other gender.
+    if word.endswith(("ій", "ий")):
+        return Gender.MALE, 2
+    if word.endswith(("а", "я", "ія", "на")) and not word.endswith(("ка", "ча")):
+        return Gender.FEMALE, 1
+    if word.endswith(("о", "ев", "ов", "ін", "ин")):
+        return Gender.MALE, 1
+    return Gender.UNKNOWN, 0
+
+
 def detect_gender_from_name(full_name: str | None) -> Gender:
     """Cheap heuristic on UA/RU name endings. Far from perfect, but good enough
-    as a hint when the resume doesn't specify gender."""
+    as a hint when the resume doesn't specify gender.
+
+    Handles both name orders. work.ua's `fio` field comes as "Прізвище
+    Ім'я" (surname first); robota.ua and free-text resumes are more often
+    "Ім'я Прізвище" (or "Ім'я Прізвище По-батькові"). The original version
+    only ever looked at word 0, so on a surname-first record it scored the
+    SURNAME as if it were the given name -- e.g. "Балагура Віталій" (a man)
+    read "Балагура" and, because that ends in "-а", came back FEMALE.
+
+    Fix: don't trust position. A по-батькові (patronymic), when present, is
+    the strongest and order-independent signal, so it wins outright.
+    Otherwise every word is scored (see _gender_word_signal) and the
+    highest-confidence, unambiguous verdict wins; if the best-scoring words
+    disagree, the guess isn't reliable enough to act on and this returns
+    UNKNOWN -- same philosophy as a missing age: don't silently reject on a
+    shaky signal, let the wider window / the call itself sort it out.
+    """
     if not full_name:
         return Gender.UNKNOWN
-    first = full_name.strip().split()[0].lower() if full_name.strip() else ""
-    if first.endswith(("а", "я", "ія", "на")) and not first.endswith(("ка", "ча")):
-        return Gender.FEMALE
-    if first.endswith(("о", "ій", "ко", "ук", "юк", "ук", "ев", "ов", "ін", "ин")):
-        return Gender.MALE
-    return Gender.UNKNOWN
+    words = [w.lower() for w in full_name.strip().split() if w.strip()]
+    if not words:
+        return Gender.UNKNOWN
+
+    for w in words:
+        if w.endswith(("ович", "евич", "йович")):
+            return Gender.MALE
+        if w.endswith(("івна", "ївна", "овна", "евна")):
+            return Gender.FEMALE
+
+    scored = [_gender_word_signal(w) for w in words]
+    best = max((c for _, c in scored), default=0)
+    if best == 0:
+        return Gender.UNKNOWN
+    top = {g for g, c in scored if c == best}
+    return top.pop() if len(top) == 1 else Gender.UNKNOWN
 
 
 def evaluate(

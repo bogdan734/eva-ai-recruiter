@@ -25,6 +25,17 @@ def test_repetition_tracker_detects_repeat():
     assert t.observe("Яка зарплата буде?") == 2
 
 
+def test_repetition_catches_a_reworded_question():
+    """The whole point of the tracker: the same question asked twice in
+    different words. Interrogatives are not topic -- if they count towards the
+    similarity score, "Скільки буде зарплата?" vs "Яка зарплата буде?" lands at
+    0.50 against a 0.55 bar and Єва loops instead of exiting."""
+    t = RepetitionTracker()
+    assert t.observe("Скільки буде зарплата?") == 1
+    assert t.observe("Яка зарплата буде?") == 2
+    assert t.observe("А зарплата яка буде?") == 3
+
+
 def test_repetition_below_threshold():
     t = RepetitionTracker()
     assert t.observe("Розкажіть про вакансію") == 1

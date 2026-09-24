@@ -121,6 +121,97 @@ async def handle_vapi_event(payload: VapiWebhookPayload) -> None:
     )
 
 
+# Question wording changes; what the question is *for* does not. Each field is
+# found by keyword over the question text, in both Ukrainian and Russian, so
+# rewording a question or inserting a new one cannot silently drop a column.
+_FORM_FIELD_KEYWORDS: dict[str, tuple[str, ...]] = {
+    # Stems, not whole words: «Ваше ПІБ», «На яку посаду претендуєте?» and «Ваша
+    # посада» are all the same question in different clothes, and Ukrainian
+    # declines the noun in most of them.
+    "full_name": ("піб", "прізвищ", "ім'я", "імя", "фио", "фамили", "имя", "вас зовут", "вас звати"),
+    "phone": ("телефон", "номер", "phone", "тел."),
+    "email": ("пошт", "почт", "e-mail", "email", "мейл"),
+    "region": ("міст", "город", "регіон", "регион", "област", "де ви", "где вы", "проживан"),
+    "position": ("посад", "должност", "вакансі", "ваканси", "напрям", "направлен", "позиц"),
+    "age": ("вік", "возраст", "скільки вам", "сколько вам", "років", "лет"),
+}
+
+
+def _pick_form_field(answers: dict[str, str], field: str) -> str | None:
+    """First answer whose question mentions what we are looking for."""
+    for question, value in answers.items():
+        text = str(question or "").strip().lower()
+        if not str(value or "").strip():
+            continue
+        if any(kw in text for kw in _FORM_FIELD_KEYWORDS[field]):
+            return str(value).strip()
+    return None
+
+
+def _form_resume_text(answers: dict[str, str]) -> str:
+    """Everything she asked and everything they answered, kept verbatim.
+
+    The recruiter reads the card before deciding, and a form answer we did not
+    map to a field is often the one that matters — a note about shift work, a
+    licence category. Dropping it because it has no column would make the card
+    worse than the spreadsheet row it came from.
+    """
+    return "\n".join(
+        f"{str(q).strip()}: {str(v).strip()}"
+        for q, v in answers.items()
+        if str(v or "").strip()
+    )
+
+
+async def handle_google_form_submission(answers: dict[str, str]) -> dict:
+    """One form submission -> one CRM card, filed under «Анкети».
+
+    Treated as a self-applied candidate (is_response=True): the person came to
+    us, so under the 04.09 policy they land in «На розгляді менеджера» and Єва
+    never cold-calls them. That is the same handling the recruiter has been
+    doing by hand for these rows.
+    """
+    from src.api.inbound_router import IngestPayload, InboundRouter
+
+    name = _pick_form_field(answers, "full_name")
+    phone = _pick_form_field(answers, "phone")
+    if not name or not phone:
+        # Worth a loud log rather than a silent 200: it means the form was
+        # edited into a shape this mapping no longer recognises.
+        log.warning(
+            "googleform.unmapped_submission",
+            questions=list(answers.keys())[:12],
+            has_name=bool(name), has_phone=bool(phone),
+        )
+        return {"ok": False, "reason": "no name or phone in submission"}
+
+    result = await InboundRouter().ingest(
+        IngestPayload(
+            full_name=name,
+            phone_raw=phone,
+            email=_pick_form_field(answers, "email"),
+            region_raw=_pick_form_field(answers, "region"),
+            desired_position=_pick_form_field(answers, "position"),
+            resume_text=_form_resume_text(answers),
+            source="googleform",
+            is_response=True,
+        )
+    )
+    log.info(
+        "googleform.routed",
+        accepted=result.accepted, duplicate=result.duplicate,
+        candidate_id=result.candidate_id, lead_id=result.keycrm_lead_id,
+        reason=result.reason,
+    )
+    return {
+        "ok": result.accepted,
+        "duplicate": result.duplicate,
+        "candidate_id": result.candidate_id,
+        "lead_id": result.keycrm_lead_id,
+        "reason": result.reason,
+    }
+
+
 async def handle_workua_inbound(payload: WorkUaInboundPayload) -> None:
     router = InboundRouter()
     result = await router.ingest(
@@ -132,6 +223,10 @@ async def handle_workua_inbound(payload: WorkUaInboundPayload) -> None:
             desired_position=payload.desired_position,
             work_ua_url=payload.work_ua_url,
             source=payload.source,
+            # 2026-09-04 policy change: this endpoint carries a work.ua response
+            # someone submitted manually/via recovery -- same is_response rule
+            # as the automated poller applies here too.
+            is_response=True,
         )
     )
     log.info(

@@ -213,16 +213,30 @@ async def run() -> dict[str, str]:
     return await check_vacancies()
 
 
-def report_block(state: dict[str, str] | None = None) -> str:
+def report_block(
+    state: dict[str, str] | None = None, *, suppress_keys: set[str] | None = None
+) -> str:
     """Postings section for the daily report. Empty while everything is up.
 
     Silence when all is well is the point: a block that prints every day gets
     read as decoration. It appears exactly when work.ua has stopped carrying
     something we recruit for.
+
+    2026-09-05: `suppress_keys` -- vacancy keys with genuine recent intake,
+    supplied by the caller -- override a REMOVED/starved verdict. That verdict
+    can go stale forever: merge_states() never lets an UNKNOWN probe (e.g. a
+    Cloudflare 403 on the job page, indistinguishable here from a real block)
+    correct an old REMOVED, so a one-time misread or a since-resolved removal
+    can repeat in every report indefinitely. An actual candidate response is
+    ground truth no probe result can outrank. Suppressed vacancies log a
+    one-line note instead of vanishing silently, so the contradiction is still
+    visible to whoever reads logs, even though the client is not told to
+    republish something that is plainly still live.
     """
     jobs = state if state is not None else _load_state()
     if not jobs:
         return ""
+    suppress_keys = suppress_keys or set()
 
     dead: list[str] = []
     starved: list[str] = []
@@ -233,6 +247,16 @@ def report_block(state: dict[str, str] | None = None) -> str:
         states = {jid: jobs.get(jid, UNKNOWN) for jid in ids}
         gone = [jid for jid, st in states.items() if st == REMOVED]
         if not gone:
+            continue
+        if key in suppress_keys:
+            log.warning(
+                "workua.liveness.starved_but_recent_intake",
+                vacancy=key,
+                job_ids=ids,
+                note="probe says removed/starved but real responses arrived "
+                     "recently -- suppressing the report line, probe state "
+                     "is likely stuck on a stale or Cloudflare-blocked check",
+            )
             continue
         if route_is_starved(states):
             what = "обдзвін" if getattr(vacancy, "calls_enabled", False) else "збір"
@@ -247,7 +271,7 @@ def report_block(state: dict[str, str] | None = None) -> str:
     lines += [f"├ ⚠️ {t}" for t in dead]
     lines += [f"├ 🔴 {t}" for t in starved]
     lines.append(
-        "└ Клієнту треба перепублікувати. Новий job_id завести:"
+        "└ Клієнту треба перепублікувати. Новий job id завести:"
         " /menu → Параметри вакансії → Збір і обдзвін —"
         " пропущені відгуки система добере сама"
     )

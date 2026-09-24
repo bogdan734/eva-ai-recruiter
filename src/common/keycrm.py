@@ -76,10 +76,15 @@ def _is_real_phone(phone: str | None) -> bool:
 # e-mail was …@phone-registration.rabota.ua):
 #   1 work.ua · 2 rabota.ua · 3 Анкети · 4 Telegram
 #
-# 3 belongs to the other integration's channel and is never ours to claim.
+# 3 used to belong to a third-party integration that filed the Google-Form
+# submissions, so we left it alone. That integration has stopped delivering —
+# the rows the recruiter filled in on 08-18.09 never arrived and had to be
+# entered by hand — and the form now posts to us directly, so cards from it
+# belong under the label she already filters by.
 CRM_SOURCE_IDS = {
     "workua": 1,
     "robotaua": 2,
+    "googleform": 3,
     "telegram": 4,
 }
 DEFAULT_SOURCE_ID = 1
@@ -354,7 +359,11 @@ class KeyCRMClient:
         status_id: int = STATUS_NEW,
         source_id: int = 1,
         manager_id: int = DEFAULT_MANAGER_ID,
-        save_buyer: bool = True,
+        # 2026-09-03: recruiter wants to review a new contact before it's
+        # filed as a permanent client, not have that decision made for her at
+        # intake. Default changed True->False; call sites that truly want an
+        # auto-saved buyer must opt in explicitly.
+        save_buyer: bool = False,
     ) -> dict[str, Any]:
         """Create a lead with contact + custom fields in one call."""
         custom: list[dict[str, Any]] = []
@@ -374,6 +383,16 @@ class KeyCRMClient:
             custom.append({"uuid": FIELD_RESUME_URL, "value": vacancy_url})
         elif resume_url:
             custom.append({"uuid": FIELD_RESUME_URL, "value": resume_url})
+        # The real «Посилання на резюме» field (added later in the KeyCRM UI,
+        # resolved by display name -- see _EXTRA_FIELD_NAMES). Until 2026-09-03
+        # this was only ever written by write_call_results, i.e. only after a
+        # successful call -- so it stayed empty on every card for anyone Eva
+        # never reached. Fill it at creation time too, from the same resume_url
+        # the candidate applied with, regardless of whether a call ever happens.
+        if resume_url:
+            extra = await self._resolve_extra_fields()
+            if extra.get("resume_link"):
+                custom.append({"uuid": extra["resume_link"], "value": resume_url})
         if ai_audio_url:
             custom.append({"uuid": FIELD_AI_AUDIO, "value": ai_audio_url})
         if ai_transcript:

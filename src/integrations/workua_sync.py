@@ -32,12 +32,10 @@ from src.integrations.workua_api import (
     parse_resume,
     parse_response,
 )
-from src.match.profile_filter import FilterResult
 from src.match.profile_filter import evaluate as profile_evaluate
 
 # Stand-in verdict for vacancies whose candidates are not screened by the sales
 # portrait — the recruiter reads the card instead.
-_ACCEPTED = FilterResult(accepted=True, reason="intake_only_vacancy")
 from src.match.scorer import MatchScorer
 
 log = structlog.get_logger()
@@ -154,29 +152,13 @@ async def _ingest_response(resp: Any, *, router: InboundRouter, stats: PollStats
 
     route = vacancies.for_workua(resp.job_id) or vacancies.DEFAULT
     full_name = resp.fio or "Кандидат work.ua"
-    # Quick profile filter — region/age via from_type is not available here yet,
-    # but birth_date is.
-    birth_year = None
-    if resp.birth_date and len(resp.birth_date) >= 4:
-        try:
-            birth_year = int(resp.birth_date[:4])
-        except ValueError:
-            birth_year = None
 
-    # The portrait below is the sales one. An intake-only vacancy has its own
-    # requirements and a human reads the card, so it goes straight through.
-    profile = _ACCEPTED if not route.screen_enabled else profile_evaluate(
-        full_name=full_name,
-        region=None,  # not in response payload; AI will ask on call
-        desired_position=resp.text or resp.cover,
-        last_position=None,
-        resume_text=(resp.text or "") + " " + (resp.cover or ""),
-        birth_year=birth_year,
-    )
-    if not profile.accepted:
-        stats.profile_rejected += 1
-        log.info("workua.profile_rejected", id=resp.id, reason=profile.reason)
-        return
+    # 2026-09-04 policy change: someone who responded to the vacancy himself
+    # always gets a card -- age/region/role no longer gate intake, only
+    # whether Єва calls (see IngestPayload.is_response / InboundRouter.ingest).
+    # The portrait filter used to run here and silently drop the applicant
+    # before router.ingest() ever saw them; that is exactly what the
+    # recruiters asked to stop.
 
     # Employer-cabinet link to this applicant's resume (FREE — no paid contact
     # opening). Format confirmed 2026-07-22: /employer/my/applicants/{candidate_id}/.
@@ -201,9 +183,11 @@ async def _ingest_response(resp: Any, *, router: InboundRouter, stats: PollStats
             workua_response_id=str(resp.id),
             resume_text=((resp.text or "") + (("\n\n" + resp.cover) if resp.cover else "")).strip() or None,
             source=f"workua_response_{resp.from_type}",
+            response_date=resp.date,
             vacancy_id=vacancies.LOCAL_FK,  # local FK; work.ua job_id lives in raw payload
             vacancy_key=route.key,
             board_vacancy_id=resp.job_id,
+            is_response=True,
         )
     )
     if not result.accepted:
@@ -249,6 +233,11 @@ async def catch_up_skipped(
         last = resume_from
         pages = 0
         while pages < max_pages:
+            # Both kinds are genuine applications. `phonecall` carries the same
+            # CV, phone and email as `send`; work.ua only tags it differently
+            # (checked against the live feed 23.09.2026). Dropping it created a
+            # gap against the cabinet's own «відгуки» count, which already
+            # includes these rows.
             page = await client.list_responses(
                 limit=page_size, last_id=last, sort=1, from_types=["send", "phonecall"]
             )
@@ -291,6 +280,9 @@ async def poll_responses(
     *,
     client: WorkUaClient | None = None,
     router: InboundRouter | None = None,
+    # On by default: a `phonecall` row is a full application with a CV
+    # attached, not a bare "someone looked at our number" event -- see the
+    # module docstring. The flag stays so a backfill can narrow the pull.
     include_phonecalls: bool = True,
     page_size: int = 50,
 ) -> PollStats:

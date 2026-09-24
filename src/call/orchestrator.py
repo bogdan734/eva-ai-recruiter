@@ -9,6 +9,7 @@ This module covers both outbound (initiated by scheduler) and inbound
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -146,6 +147,14 @@ def _outcome_label(status: "CandidateStatus", summary, tg_sent: bool = False) ->
     return "☎️ опрацьовано"
 
 
+def _verdict_word(summary) -> str:
+    """"unreached" used to mean both "nobody picked up" and "talked but did not
+    fit", so a card from a three-minute conversation read as a failed dial."""
+    if summary.qualified:
+        return "qualified"
+    return "not_qualified" if getattr(summary, "spoke_with_candidate", False) else "unreached"
+
+
 class CallOrchestrator:
     def __init__(
         self,
@@ -238,6 +247,12 @@ class CallOrchestrator:
             "model": {
                 "provider": "anthropic",
                 "model": "claude-haiku-4-5-20251001",
+                # Overrides REPLACE the model object, they do not merge into
+                # it: whatever the assistant has configured is gone the moment
+                # this key is sent. maxTokens has to be repeated here or Vapi's
+                # default of 250 applies -- and 250 tokens of Ukrainian is
+                # roughly half a minute of uninterrupted speech.
+                "maxTokens": 75,
                 "messages": [{"role": "system", "content": prompt}],
             },
             "metadata": {
@@ -546,6 +561,19 @@ class CallOrchestrator:
         # attempt AFTER the successful one, which used to blank the CRM card ("Немає
         # транскрипту для аналізу"), push the candidate back to Недозвін and fire a
         # "не змогли додзвонитися" Telegram message at someone Eva had already screened.
+        #
+        # "Real conversation" used to mean "any prior Call row with a non-empty
+        # transcript" -- but Балабух/Хустнутдінов/Цвігун (candidates 3099/3166/3181,
+        # 05.09.2026) all have exactly that kind of transcript on file and none of it
+        # is a real conversation: it's Eva alone saying "алло, добрий день" into a bad
+        # line, or a one-word non-answer, with spoke_with_candidate=False (or unset,
+        # for the pre-migration rows). A same-day SIP-486 storm gave three candidates
+        # an empty-transcript retry right after one of those junk transcripts, this
+        # guard mistook it for "already screened", and returned without ever moving
+        # `candidate.status` off CALLING -- so all three sat invisible in "calling"
+        # for hours, neither queued nor dispositioned. Require the same
+        # spoke_with_candidate signal the dispatcher's REAL_CONTACT_SEC guard uses
+        # (see src/scheduler/dispatcher.py) so "real" means the same thing everywhere.
         if not (transcript or "").strip() and candidate is not None:
             async with session_scope() as sess:
                 spoken = (await sess.execute(
@@ -554,6 +582,7 @@ class CallOrchestrator:
                         Call.id != db_call.id,
                         Call.transcript.isnot(None),
                         Call.transcript != "",
+                        Call.spoke_with_candidate.is_(True),
                     ).limit(1)
                 )).scalar_one_or_none()
             if spoken is not None:
@@ -565,6 +594,11 @@ class CallOrchestrator:
                     candidate_id=candidate.id, call_id=db_call.id, real_call_id=spoken,
                 )
                 return
+            # No genuine prior conversation on file after all (or this flag simply
+            # was never true for anything this candidate has done) -- this dead
+            # attempt IS the outcome to disposition, so fall through to the normal
+            # summarizer/qualification logic below rather than leaving `candidate`
+            # stuck in CALLING with nothing to move it out.
 
         summary: CallSummary
         try:
@@ -592,6 +626,7 @@ class CallOrchestrator:
         db_call.sentiment = (summary.sentiment or "")[:16] or None
         db_call.objections = summary.objections
         db_call.language_used = (summary.language or "")[:8] or None
+        db_call.spoke_with_candidate = summary.spoke_with_candidate
         db_call.tokens_input += summary.tokens_in
         db_call.tokens_output += summary.tokens_out
         # Age gate: the voice model may misjudge the window, so enforce it here —
@@ -777,26 +812,48 @@ class CallOrchestrator:
                 or candidate.call_attempts >= self._settings.call_max_attempts
             )
             if should_push:
-                try:
-                    created = await self._keycrm.create_lead(
-                        title=candidate.full_name,
-                        full_name=candidate.full_name,
-                        phone=candidate.phone_e164,
-                        email=candidate.email,
-                        vacancy_name=(vacancy.title if vacancy else "Менеджер з продажу"),
-                        manager_comment=(
-                            f"джерело: {candidate.source} | "
-                            f"AI verdict: {'qualified' if summary.qualified else 'unreached'} | "
-                            f"attempts: {candidate.call_attempts} | "
-                            f"summary: {(summary.summary or '')[:400]}"
-                        ),
-                    )
+                # Retried, because a single swallowed failure here is how twelve
+                # qualified candidates from 21-24.07.2026 ended up existing only
+                # in our own database — nobody noticed for seven weeks.
+                created = None
+                last_error: Exception | None = None
+                for attempt in range(1, 4):
+                    try:
+                        created = await self._keycrm.create_lead(
+                            title=candidate.full_name,
+                            full_name=candidate.full_name,
+                            phone=candidate.phone_e164,
+                            email=candidate.email,
+                            vacancy_name=(vacancy.title if vacancy else "Менеджер з продажу"),
+                            manager_comment=(
+                                f"джерело: {candidate.source} | "
+                                f"AI verdict: {_verdict_word(summary)} | "
+                                f"attempts: {candidate.call_attempts} | "
+                                f"summary: {(summary.summary or '')[:400]}"
+                            ),
+                        )
+                        break
+                    except Exception as e:  # noqa: BLE001 — retried, then escalated
+                        last_error = e
+                        log.warning(
+                            "orchestrator.keycrm_create_retry",
+                            attempt=attempt,
+                            error=str(e)[:200],
+                            candidate_id=candidate.id,
+                        )
+                        if attempt < 3:
+                            await asyncio.sleep(2.0 * attempt)
+                if created is not None:
                     candidate.keycrm_lead_id = int(created.get("id") or 0) or None
-                except Exception as e:
-                    log.warning(
+                else:
+                    # Error, not warning: this is a real candidate the recruiter
+                    # will never see unless somebody acts on this line.
+                    log.error(
                         "orchestrator.keycrm_create_failed",
-                        error=str(e),
+                        error=str(last_error)[:300],
                         candidate_id=candidate.id,
+                        phone=candidate.phone_e164,
+                        qualified=summary.qualified,
                     )
 
         # Flag the lead as AI-handled by making "Єва АІ" the responsible
@@ -872,17 +929,22 @@ class CallOrchestrator:
                 )
                 candidate.status = CandidateStatus.CLOSED
 
-        # Save the person as a buyer (green 'client' check), link the card to it —
-        # this also covers imported cards that create_lead never touched — and put
-        # 'called? / result' on that buyer's note so a recruiter tells at a glance
-        # whether Eva already worked this person. Buyers dedupe by phone.
+        # Put 'called? / result' on the contact's note so a recruiter tells at a
+        # glance whether Єва already worked this person — but ONLY for someone
+        # already saved as a buyer. Deciding who becomes a client is the
+        # recruiter's call (create_lead has had save_buyer=False since 03.09 for
+        # the same reason); this used to call ensure_buyer, which quietly created
+        # one after every call and put a green «Покупець» on cards nobody asked
+        # to save.
         if candidate.phone_e164:
             try:
-                buyer_id = await self._keycrm.ensure_buyer(
-                    full_name=candidate.full_name,
-                    phone=candidate.phone_e164,
-                    email=candidate.email,
-                )
+                buyer_id = await self._keycrm.find_buyer_by_phone(candidate.phone_e164)
+                if not buyer_id:
+                    log.info(
+                        "orchestrator.buyer_note_skipped",
+                        candidate_id=candidate.id,
+                        note="not saved as a buyer — leaving that to the recruiter",
+                    )
                 if buyer_id:
                     if candidate.keycrm_lead_id:
                         await self._keycrm.link_card_to_buyer(

@@ -1,27 +1,44 @@
+"""Routing rules for the job-board postings.
+
+Compared by `.key`, not identity: `vacancies.get()` reads the live registry,
+which merges the recruiter's panel edits over the shipped constants and so
+hands back an equal-but-distinct object.
+"""
 from src.common import vacancies
 
 
 def test_workua_routing():
-    assert vacancies.for_workua(8249916) is vacancies.SALES
-    assert vacancies.for_workua(8242731) is vacancies.ACCOUNTANT
-    assert vacancies.for_workua("8242731") is vacancies.ACCOUNTANT
+    assert vacancies.for_workua(8249916).key == "sales"
+    assert vacancies.for_workua(8242731).key == "accountant"
+    assert vacancies.for_workua("8242731").key == "accountant"
     assert vacancies.for_workua(999) is None
     assert vacancies.for_workua(None) is None
 
 
 def test_robotaua_routing():
-    assert vacancies.for_robotaua(11277559) is vacancies.SALES
-    assert vacancies.for_robotaua(11284462) is vacancies.SALES
-    assert vacancies.for_robotaua(11249166) is vacancies.ACCOUNTANT
-    assert vacancies.for_robotaua(11292426) is vacancies.ACCOUNTANT
+    assert vacancies.for_robotaua(11277559).key == "sales"
+    assert vacancies.for_robotaua(11284462).key == "sales"
+    # 2026-09-03: client reused 11249166 for a different posting -- now
+    # LOGISTICS_JR, not ACCOUNTANT. See vacancies.py comment.
+    assert vacancies.for_robotaua(11249166).key == "logistics_jr"
+    assert vacancies.for_robotaua(11292426).key == "accountant"
+
+
+def test_logistics_jr_routing():
+    v = vacancies.for_robotaua(11249166)
+    assert v.key == "logistics_jr"
+    assert v.keycrm_pipeline_id == 1
+    assert v.calls_enabled
+    assert v.screen_enabled
+    assert v.open_paid_contacts
 
 
 def test_both_accountant_postings_route_to_one_funnel():
     """Client 05.08: «єдиний» and «помічник» share the Бухгалтер funnel."""
     for wid in (8242731, 8374143):
         assert vacancies.for_workua(wid).keycrm_pipeline_id == 6
-    for rid in (11249166, 11292426):
-        assert vacancies.for_robotaua(rid).keycrm_pipeline_id == 6
+    # 11249166 moved to LOGISTICS_JR 2026-09-03, only 11292426 stayed.
+    assert vacancies.for_robotaua(11292426).keycrm_pipeline_id == 6
 
 
 def test_accountant_intake_is_enabled():
@@ -36,18 +53,26 @@ def test_accountant_intake_is_enabled():
 
 
 def test_accountant_still_never_gets_called():
-    """Enabling intake must not put accountants into the dialer or Єва's chat."""
-    assert not vacancies.ACCOUNTANT.calls_enabled
-    assert not vacancies.ACCOUNTANT.screen_enabled
-    assert not vacancies.ACCOUNTANT.open_paid_contacts
-    for rid in (11249166, 11292426):
-        assert rid not in vacancies.robotaua_ids(calls_only=True)
+    """Enabling intake must not put accountants into the dialer or Єва's chat.
+
+    Checked against the live registry, not the shipped constant: panel edits are
+    merged over the constants, so a stray edit there is exactly the way this
+    could silently become false."""
+    live = vacancies.get("accountant")
+    assert not live.calls_enabled
+    assert not live.screen_enabled
+    # Not asserted: open_paid_contacts. The panel has it ON (shipped default is
+    # OFF) and that is a legitimate recruiter choice -- revealing a number she
+    # intends to dial herself. It costs robota.ua quota, but it cannot put
+    # anyone into Єва's dialer, which is what this test exists to guarantee.
+    assert not (set(live.robotaua_ids) & vacancies.robotaua_ids(calls_only=True))
+    assert not (set(live.workua_ids) & vacancies.workua_ids(calls_only=True))
 
 
 def test_unknown_key_falls_back_to_sales():
-    assert vacancies.get(None) is vacancies.SALES
-    assert vacancies.get("nope") is vacancies.SALES
-    assert vacancies.get("accountant") is vacancies.ACCOUNTANT
+    assert vacancies.get(None).key == "sales"
+    assert vacancies.get("nope").key == "sales"
+    assert vacancies.get("accountant").key == "accountant"
 
 
 def test_accountant_is_intake_only():
@@ -61,8 +86,10 @@ def test_accountant_is_intake_only():
 
 def test_calls_only_view_excludes_accountant():
     """The chat poller pulls this view — Єва must not see accountant threads."""
-    assert 11249166 not in vacancies.robotaua_ids(calls_only=True)
+    assert 11292426 not in vacancies.robotaua_ids(calls_only=True)
     assert 11277559 in vacancies.robotaua_ids(calls_only=True)
+    # LOGISTICS_JR calls_enabled=True -- Єва DOES see this one now.
+    assert 11249166 in vacancies.robotaua_ids(calls_only=True)
     assert 8242731 not in vacancies.workua_ids(calls_only=True)
     assert 8249916 in vacancies.workua_ids(calls_only=True)
 
@@ -71,7 +98,7 @@ def test_no_vacancy_id_is_claimed_twice():
     """A board id belonging to two routes would make the funnel non-deterministic."""
     for attr in ("workua_ids", "robotaua_ids"):
         seen: set[int] = set()
-        for v in vacancies.VACANCIES.values():
+        for v in vacancies.all_vacancies().values():
             ids = getattr(v, attr)
             assert not (ids & seen), f"{attr} overlap in {v.key}"
             seen |= ids

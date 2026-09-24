@@ -14,6 +14,15 @@ _STOPWORDS = {
     "і", "та", "а", "але", "що", "як", "це", "у", "в", "на", "до", "по",
     "и", "а", "но", "что", "как", "это", "в", "на", "к", "по",
     "the", "a", "an", "is", "are", "do", "does",
+    # Interrogatives carry no topic -- "Скільки буде зарплата?" and "Яка
+    # зарплата буде?" are one question asked twice, but with the question word
+    # counted they scored 0.50 against a 0.55 bar and read as two different
+    # questions, which is precisely the case this tracker exists to catch.
+    "яка", "який", "яке", "які", "якою", "скільки", "коли", "де", "куди",
+    "чому", "чого", "хто", "кого", "чи",
+    "какая", "какой", "какое", "какие", "сколько", "когда", "где", "куда",
+    "почему", "зачем", "кто", "кого", "ли",
+    "what", "which", "when", "where", "why", "who", "how",
 }
 
 

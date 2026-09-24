@@ -111,7 +111,7 @@ async def main() -> None:
                     status_id=route.keycrm_status_id or STATUS_NEW,
                     source_id=crm_source_id(c.source),
                     manager_id=DEFAULT_MANAGER_ID,
-                    save_buyer=route.calls_enabled,
+                    save_buyer=False,  # 2026-09-03: recruiter reviews/saves manually
                 )
                 lead_id = int(created.get("id") or 0)
                 if not lead_id:

@@ -66,8 +66,15 @@ CHAT_CONVERSATIONS_URL = "https://chat-api.robota.ua/v2/conversations/all"
 CHAT_COUNTERS_URL = "https://chat-api.robota.ua/v2/conversations/counters"
 CHAT_UNREAD_URL = "https://chat-api.robota.ua/v1/not-read-messages"
 CHAT_MESSAGES_URL = "https://chat-api.robota.ua/v1/conversations/{conversation_id}/messages"
-# Employer-cabinet link a recruiter can open from the CRM card.
+# Employer-cabinet link a recruiter can open from the CRM card -- bare
+# resume view, used where there is no specific application record (e.g.
+# a robota.ua chat message rather than a vacancy apply).
 CANDIDATE_URL = "https://robota.ua/candidates/{resume_id}"
+# Same cabinet, but the "review this response" view for one specific
+# application (apply id, not resume id) -- what a recruiter actually
+# lands on clicking an apply from robota.ua's own applies list. Used for
+# every vacancy apply, since those always carry an apply id.
+APPLY_REVIEW_URL = "https://robota.ua/my/vacancies/all/applies?id={apply_id}-prof"
 # CV file of an `AttachedFile` apply. Those have resumeId=0, so /resume/{id}
 # can never return them — the file is attached to the apply itself. The apply
 # payload carries this exact URL in `filePath`; the template is the fallback.
@@ -717,9 +724,66 @@ def parse_apply(
             resume.get("experiences") or apply.get("experiences")
         ),
         "resume_text": build_resume_text(apply, resume),
-        "resume_url": CANDIDATE_URL.format(resume_id=resume_id) if resume_id else None,
+        "resume_url": APPLY_REVIEW_URL.format(apply_id=apply.get("id")) if apply.get("id") else None,
         "applied_at": apply.get("addDate"),
         "resume_type": apply.get("resumeType"),
         # robota.ua knows a number exists but keeps it behind "open contacts".
         "has_hidden_phone": bool(resume.get("hasPhone")) and not phone,
     }
+
+
+# --- one block verdict for everything that talks to robota.ua ---------------
+#
+# Cloudflare flags the address we come from, so a challenge on the chat API is
+# also a challenge on the responses API -- the two just have not noticed each
+# other before. Both pollers write here on a challenge and read here before
+# making a request, so one back-off covers the whole host.
+
+_SHARED_BLOCK = "robotaua_block.json"
+
+
+def note_block(minutes: int, *, who: str) -> None:
+    """Record a Cloudflare challenge for EVERY robota.ua caller.
+
+    Never shortens an existing block: if someone else is already parked for
+    longer, that verdict stands.
+    """
+    from datetime import datetime, timedelta
+
+    from src.common.state import state_dir
+
+    p = state_dir() / _SHARED_BLOCK
+    until = datetime.utcnow() + timedelta(minutes=max(1, int(minutes)))
+    prev = None
+    try:
+        prev_raw = json.loads(p.read_text()).get("until")
+        prev = datetime.fromisoformat(prev_raw) if prev_raw else None
+    except Exception:
+        prev = None
+    if prev and prev > until:
+        until = prev
+    try:
+        p.write_text(json.dumps(
+            {"until": until.isoformat(timespec="seconds"), "by": who},
+            ensure_ascii=False,
+        ))
+    except Exception:
+        # A state file we cannot write must not take the poller down with it.
+        pass
+    log.warning("robotaua.shared_block", until=until.isoformat(timespec="seconds"), by=who)
+
+
+def blocked_until():
+    """When the shared block expires, or None if we are free to call."""
+    from datetime import datetime
+
+    from src.common.state import state_dir
+
+    try:
+        raw = json.loads((state_dir() / _SHARED_BLOCK).read_text()).get("until")
+        if not raw:
+            return None
+        until = datetime.fromisoformat(raw)
+        return until if until > datetime.utcnow() else None
+    except Exception:
+        return None

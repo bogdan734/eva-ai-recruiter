@@ -35,7 +35,15 @@ class Settings(BaseSettings):
     vapi_assistant_id: str = ""
     vapi_webhook_secret: str = ""
 
-    vapi_phone_number_id: str = ""  # Vapi phone-number id used for outbound (Zadarma trunk)
+    vapi_phone_number_id: str = ""  # Vapi phone-number id used for outbound (Stream Telecom trunk)
+    # Vapi regions are isolated environments: an organization belongs to one,
+    # and assistants, numbers and SIP credentials live with it. Moving to the
+    # EU region is therefore a different base URL AND a different key -- kept
+    # here so the move, and the move back, are one line in .env rather than an
+    # edit to three source files while calls are in flight.
+    #   US: https://api.vapi.ai    (sip.vapi.ai)
+    #   EU: https://api.eu.vapi.ai (sip.eu.vapi.ai)
+    vapi_base_url: str = "https://api.vapi.ai"
     ringostat_api_key: str = ""
     ringostat_project_id: str = ""
 
@@ -49,6 +57,60 @@ class Settings(BaseSettings):
     workua_scrape_daily_limit: int = 50
     workua_proxy_url: str = ""
     workua_allowed_vacancy_ids: str = ""
+    # Cold sourcing (search the work.ua resume database as a logged-in employer,
+    # rather than waiting for candidates to respond). We never type the employer
+    # password into an automated login -- a human logs in once in their own
+    # browser and hands us the resulting session (Playwright storage_state JSON,
+    # or a plain cookie export) instead. No session file -> the job logs once
+    # and skips; it never crashes the scheduler and never blocks other polling.
+    workua_session_state_path: str = "/state/workua_session.json"
+    workua_cold_sourcing_enabled: bool = True
+    # Resumes actually fed into Eva's call queue per run -- deliberately much
+    # smaller than workua_scrape_daily_limit (which caps raw page fetches),
+    # so one run can never flood the queue.
+    workua_cold_sourcing_max_per_run: int = 10
+    # Search result pages to open per role-marker query per vacancy, before
+    # moving to the next query. Keeps one run's request count predictable.
+    workua_cold_sourcing_max_per_query: int = 6
+    # 07.09.2026: a resume's phone number is invisible until an employer
+    # explicitly "opens contacts" on it -- this spends the account's SHARED
+    # daily quota (seen live: "Ви можете відкрити 6 з 10 контактів, доступних
+    # на день"), the same recruiter-facing limit used for browsing the site
+    # by hand. Deliberately small and separate from the caps above, which
+    # bound page fetches/queue size, not this specific paid/limited action --
+    # leaves headroom for the recruiter's own manual use of the same account.
+    # The account's daily contact allowance. Cold sourcing spends it in full:
+    # unspent credits do not carry over, and every one of them is a candidate
+    # Єва could have called.
+    workua_max_contact_opens_per_run: int = 10
+    # Source for cold sourcing. The API is the default because Cloudflare blocks
+    # the resume-search pages from this host; the browser path stays available
+    # for the day the API changes shape.
+    workua_cold_sourcing_use_api: bool = True
+    # How close a candidate must look to the vacancy to be worth a paid contact
+    # open and a call. 0.65 was tuned against full resume pages from the
+    # scraper; the API returns a few dozen words per person, which scores much
+    # lower for the same human — at 0.65 the run of 17.09 rejected every single
+    # candidate, including profiles literally listing «Менеджер з продажу».
+    # Watch cold_sourcing.prescreen scores in the log before moving this again.
+    cold_sourcing_match_threshold: float = 0.45
+    # Search city by city across the hiring oblasts instead of nationwide.
+    # Measured 18.09 on one query: 4 openable people nationwide (none of them
+    # in our oblasts) against 37 across our own twelve cities.
+    workua_cold_sourcing_by_region: bool = True
+    # How deep to page each city. Three pages was tuned for a nationwide sweep;
+    # a single city is a much smaller pool and only ~3% of resumes are openable
+    # at all, so depth is where the reachable people are.
+    workua_cold_sourcing_pages_per_query: int = 6
+    # Hard ceiling on search requests per call, so a run that finds nobody still
+    # ends: twelve cities times six pages times several queries would otherwise
+    # walk for half an hour.
+    workua_cold_sourcing_max_pages_per_run: int = 150
+    # Human-pace pauses for cold sourcing specifically. The 1.5-4.5s used
+    # elsewhere is fine for an API poller but reads as a bot when it is page
+    # after page of a resume search.
+    workua_cold_sourcing_min_delay_sec: float = 8.0
+    workua_cold_sourcing_max_delay_sec: float = 20.0
 
     # Pluggable job board providers (stubs — fill keys to enable).
     robotaua_api_token: str = ""

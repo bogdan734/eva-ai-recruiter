@@ -5,6 +5,7 @@ from enum import Enum
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -110,6 +111,12 @@ class Call(Base):
     status: Mapped[CallStatus] = mapped_column(String(32), default=CallStatus.FAILED.value)
     # Vapi endedReason — why the call really ended (busy / unavailable / voicemail).
     ended_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Post-call summarizer's judgment (src/call/summarizer.py): true only if the
+    # candidate actually answered at least one real screening question. NULL for
+    # calls finalized before this column existed -- treated as "unknown, don't hold
+    # it against them" everywhere it's read, same spirit as the provider-fault
+    # refund logic below.
+    spoke_with_candidate: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     audio_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     transcript: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_summary: Mapped[str | None] = mapped_column(Text, nullable=True)

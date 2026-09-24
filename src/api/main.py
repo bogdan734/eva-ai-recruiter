@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import os
 from typing import Any
 
 import structlog
@@ -21,6 +22,7 @@ from .schemas import (
     WorkUaInboundPayload,
 )
 from .services import (
+    handle_google_form_submission,
     handle_assistant_request,
     handle_keycrm_event,
     handle_tg_outcome,
@@ -104,6 +106,33 @@ async def workua_manual(payload: WorkUaInboundPayload) -> dict[str, Any]:
     return {"ok": True}
 
 
+@app.post("/webhooks/google-form")
+async def google_form_submission(request: Request) -> dict[str, Any]:
+    """Receives one Google-Form response, pushed by an Apps Script on the sheet.
+
+    A shared secret rather than a signature: the script runs inside the sheet
+    owner's Google account and the endpoint only ever creates a CRM card from
+    the payload, so the worst a leaked secret buys is junk cards — while
+    anything stronger would need her to maintain key material she has no way to
+    rotate.
+    """
+    import secrets as _secrets
+
+    expected = (os.getenv("GOOGLE_FORM_WEBHOOK_SECRET") or "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="form webhook not configured")
+    provided = (request.headers.get("x-form-secret") or "").strip()
+    if not _secrets.compare_digest(provided, expected):
+        log.warning("googleform.bad_secret")
+        raise HTTPException(status_code=401, detail="bad secret")
+
+    body = await request.json()
+    answers = body.get("answers") if isinstance(body, dict) else None
+    if not isinstance(answers, dict) or not answers:
+        raise HTTPException(status_code=400, detail="no answers in payload")
+    return await handle_google_form_submission(answers)
+
+
 @app.get("/recordings/{vapi_call_id}")
 async def get_recording(vapi_call_id: str):
     """Redirect to a freshly signed recording URL.
@@ -117,7 +146,7 @@ async def get_recording(vapi_call_id: str):
     s = get_settings()
     async with httpx.AsyncClient(timeout=20) as c:
         r = await c.get(
-            f"https://api.vapi.ai/call/{vapi_call_id}",
+            f"{get_settings().vapi_base_url}/call/{vapi_call_id}",
             headers={"Authorization": f"Bearer {s.vapi_api_key}"},
         )
         if r.status_code != 200:

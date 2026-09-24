@@ -172,7 +172,9 @@ async def handle_tg_outcome(
                     else "❌ не підходить" if reason == "misbehaved"
                     else "⚪ не актуально"
                 )
-                buyer_id = await kc.ensure_buyer(full_name=name or handle, phone=phone_key)
+                # Only annotate someone the recruiter already saved; creating
+                # a buyer here is her decision, not ours (see orchestrator).
+                buyer_id = await kc.find_buyer_by_phone(phone_key)
                 if buyer_id:
                     if lead_id:
                         await kc.link_card_to_buyer(lead_id, buyer_id)

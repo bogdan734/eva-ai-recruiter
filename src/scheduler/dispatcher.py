@@ -18,6 +18,7 @@ from src.call.orchestrator import CallOrchestrator
 from src.common.db import session_scope
 from src.common.models import Call, Candidate, CandidateStatus
 from src.common.settings import get_settings
+from src.scraper.cold_sourcing import run_cold_sourcing_cycle
 
 log = logging.getLogger("recruiter.scheduler")
 
@@ -33,6 +34,110 @@ CALLING_WINDOW_END_HOUR = 20  # never start a new batch at or after 20:00 local
 UNREACHABLE_GIVEUP_DAYS = int(os.environ.get("UNREACHABLE_GIVEUP_DAYS", "3"))
 # A job board poll must never outlive its own cadence.
 POLL_TIMEOUT_SEC = int(os.environ.get("ROBOTAUA_POLL_TIMEOUT_SEC", "300"))
+
+
+def dialable_candidates_query(s):
+    """The exact selection `run_slot()` dials each batch from.
+
+    Pulled out of the loop so the guard logic (HARD_CALL_CAP, REAL_CONTACT_SEC) is
+    testable against a plain session without spinning up a whole calling session --
+    see tests/test_dispatcher_queue.py.
+    """
+    return (
+        select(Candidate)
+        .where(
+            Candidate.status.in_(
+                (
+                    CandidateStatus.NEW_RESUME,
+                    CandidateStatus.IN_CALL_QUEUE,
+                )
+            ),
+            # A due callback earns one more attempt beyond the normal limit —
+            # the candidate asked us to ring back, so honouring it is the point.
+            or_(
+                Candidate.call_attempts < s.call_max_attempts,
+                and_(
+                    Candidate.callback_at.is_not(None),
+                    Candidate.callback_at <= func.now(),
+                ),
+            ),
+            # Scheduled callback that is not due yet must wait its turn.
+            or_(
+                Candidate.callback_at.is_(None),
+                Candidate.callback_at <= func.now(),
+            ),
+            # hard, reset-proof guards computed from the calls table
+            #
+            # This cap used to count every Call row regardless of whether the
+            # carrier ever actually connected it. Investigating why candidates
+            # 3099/3166 (call_attempts still 1, both eligible by every other
+            # rule) had silently stopped coming up for dialling since July
+            # found six Call rows each, five or six of them duration_sec == 0
+            # (the line never rang -- a mix of the 04-05.09.2026 SIP-403 outage,
+            # tagged `ended_reason` with a providerfault/sip-403 marker, see
+            # line_health.py, and an older, untagged batch from 21-30.07.2026
+            # with a blank ended_reason but the same zero-duration signature).
+            # orchestrator._finalize_call already refunds candidate.call_attempts
+            # for a recognised provider fault on exactly this reasoning -- the
+            # candidate's phone never rang, so it is not their attempt to spend.
+            # This cap should honour the same principle regardless of whether
+            # Vapi happened to label the failure: count only calls that actually
+            # connected (duration_sec > 0), so a bad trunk day -- tagged or not --
+            # can never permanently strand someone out of the queue.
+            (
+                select(func.count(Call.id))
+                .where(
+                    Call.candidate_id == Candidate.id,
+                    Call.duration_sec.is_not(None),
+                    Call.duration_sec > 0,
+                )
+                .scalar_subquery()
+            ) < HARD_CALL_CAP,
+            # A call this long used to count as "real contact, never redial"
+            # on duration alone -- but candidate 3181 (Цвігун) spent 64 seconds
+            # entirely on "алло, я вас не чую" with the screening never started,
+            # and that duration-only rule stranded her exactly the same way the
+            # HARD_CALL_CAP rule above stranded 3099/3166. The summarizer already
+            # judges this per call (spoke_with_candidate -- true only if the
+            # candidate answered a real screening question, see
+            # src/call/summarizer.py); require it here too so a long but empty
+            # call no longer blocks a legitimate retry. NULL (calls finalized
+            # before this flag was persisted) is treated as "unknown" and does
+            # not block, same as everywhere else this flag is missing.
+            (
+                select(func.count(Call.id))
+                .where(
+                    Call.candidate_id == Candidate.id,
+                    Call.duration_sec >= REAL_CONTACT_SEC,
+                    Call.spoke_with_candidate.is_(True),
+                )
+                .scalar_subquery()
+            ) == 0,
+        )
+        .order_by(Candidate.match_score.desc().nulls_last(), Candidate.created_at)
+        .limit(s.call_max_concurrent)
+    )
+
+
+async def _calls_in_flight(max_age_sec: int) -> int:
+    """Calls that are still holding a line right now.
+
+    `ended_at IS NULL` is the live signal; the age bound stops a row that never
+    got finalised (a crash mid-call, a webhook we never received) from pinning
+    a phantom channel forever. Anything older than one call's maximum duration
+    cannot still be talking.
+    """
+    cutoff = datetime.utcnow() - timedelta(seconds=max_age_sec)
+    async with session_scope() as session:
+        n = (
+            await session.execute(
+                select(func.count(Call.id)).where(
+                    Call.ended_at.is_(None),
+                    Call.started_at >= cutoff,
+                )
+            )
+        ).scalar_one()
+    return int(n or 0)
 
 
 async def run_slot() -> None:
@@ -53,55 +158,39 @@ async def run_slot() -> None:
     total, batches = 0, 0
     while batches < SLOT_MAX_BATCHES:
         async with session_scope() as session:
-            q = await session.execute(
-                select(Candidate)
-                .where(
-                    Candidate.status.in_(
-                        (
-                            CandidateStatus.NEW_RESUME,
-                            CandidateStatus.IN_CALL_QUEUE,
-                        )
-                    ),
-                    # A due callback earns one more attempt beyond the normal limit —
-                    # the candidate asked us to ring back, so honouring it is the point.
-                    or_(
-                        Candidate.call_attempts < s.call_max_attempts,
-                        and_(
-                            Candidate.callback_at.is_not(None),
-                            Candidate.callback_at <= func.now(),
-                        ),
-                    ),
-                    # Scheduled callback that is not due yet must wait its turn.
-                    or_(
-                        Candidate.callback_at.is_(None),
-                        Candidate.callback_at <= func.now(),
-                    ),
-                    # hard, reset-proof guards computed from the calls table
-                    (
-                        select(func.count(Call.id))
-                        .where(Call.candidate_id == Candidate.id)
-                        .scalar_subquery()
-                    ) < HARD_CALL_CAP,
-                    (
-                        select(func.count(Call.id))
-                        .where(
-                            Call.candidate_id == Candidate.id,
-                            Call.duration_sec >= REAL_CONTACT_SEC,
-                        )
-                        .scalar_subquery()
-                    ) == 0,
-                )
-                .order_by(Candidate.match_score.desc().nulls_last(), Candidate.created_at)
-                .limit(s.call_max_concurrent)
-            )
+            q = await session.execute(dialable_candidates_query(s))
             batch = q.scalars().all()
             if not batch:
                 break
             ids = [c.id for c in batch]
 
         batches += 1
+
+        # How many lines are free RIGHT NOW. Without this the slot dials a full
+        # batch every SLOT_BATCH_PAUSE_SEC regardless of who is still talking,
+        # and the carrier answers 486 Busy here to everything over the limit --
+        # which the candidate never hears, because their phone never rings.
+        in_flight = await _calls_in_flight(s.call_max_duration_sec + 60)
+        room = max(0, s.call_max_concurrent - in_flight)
+        if room <= 0:
+            log.info(
+                "scheduler.batch_deferred in_flight=%d limit=%d waiting=%ds",
+                in_flight, s.call_max_concurrent, SLOT_BATCH_PAUSE_SEC,
+            )
+            await asyncio.sleep(SLOT_BATCH_PAUSE_SEC)
+            continue
+        if len(ids) > room:
+            log.info(
+                "scheduler.batch_trimmed wanted=%d room=%d in_flight=%d",
+                len(ids), room, in_flight,
+            )
+            ids = ids[:room]
+
         total += len(ids)
-        log.info("scheduler.batch start=%d size=%d total=%d", batches, len(ids), total)
+        log.info(
+            "scheduler.batch start=%d size=%d total=%d in_flight=%d",
+            batches, len(ids), total, in_flight,
+        )
         await asyncio.gather(*(orchestrator.dispatch_for_candidate(cid) for cid in ids))
 
         # Let the placed calls run before dialing the next batch, otherwise
@@ -295,7 +384,7 @@ async def reconcile_unfinalized() -> None:
     orch = CallOrchestrator()
     fixed = 0
     async with httpx.AsyncClient(
-        base_url="https://api.vapi.ai",
+        base_url=s.vapi_base_url,
         headers={"Authorization": f"Bearer {os.environ['VAPI_API_KEY']}"},
         timeout=30,
     ) as c:
@@ -363,6 +452,25 @@ async def check_workua_vacancy_liveness() -> None:
         await run()
     except Exception as e:  # noqa: BLE001
         log.error("workua.liveness failed: %s", e)
+
+
+async def keepalive_workua_session() -> None:
+    """Heartbeat that stops the cold-sourcing session expiring between runs.
+
+    work.ua's session cookie is a sliding ~30-minute window; the daily 06:45
+    cold-sourcing run is 24 hours after the previous one, so without this the
+    session is always dead by the time it matters (see refresh_session).
+    """
+    from src.bot.admin import workua_paused
+    if workua_paused():
+        return
+    try:
+        from src.scraper.workua import refresh_session
+        result = await refresh_session()
+        if result != "ok":
+            log.info("workua.session_keepalive result=%s", result)
+    except Exception as e:
+        log.warning("workua.session_keepalive_failed: %s", e)
 
 
 async def poll_workua_responses() -> None:
@@ -533,6 +641,36 @@ def build_scheduler() -> AsyncIOScheduler:
         trigger=CronTrigger(hour=8, minute=30, timezone=s.app_timezone),
         id="unreachable_giveup",
         replace_existing=True,
+    )
+    # Cold sourcing: search work.ua's resume database for people who never
+    # applied anywhere, so Єва's call queue has someone to dial even on a day
+    # with zero warm responses (see run_cold_sourcing_cycle's own docstring).
+    # Once a day, well before the calling slots and off the response-poller
+    # beats, deliberately conservative given work.ua's ToS and the shared
+    # employer account this reads from. Safe to enable even with no session
+    # file on disk yet -- it just logs and no-ops until one exists.
+    scheduler.add_job(
+        run_cold_sourcing_cycle,
+        trigger=CronTrigger(
+            hour=os.environ.get("WORKUA_COLD_SOURCING_CRON_HOUR", "6"),
+            minute=45,
+            timezone=s.app_timezone,
+        ),
+        id="workua_cold_sourcing",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+    # Session heartbeat -- cheap, and the difference between cold sourcing
+    # working every morning and it silently skipping until someone re-exports
+    # cookies by hand.
+    scheduler.add_job(
+        keepalive_workua_session,
+        trigger=CronTrigger(minute="*/20", timezone=s.app_timezone),
+        id="workua_session_keepalive",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=600,
     )
     return scheduler
 

@@ -61,14 +61,11 @@ from src.integrations.robotaua_api import (
     state_dir,
     write_status,
 )
-from src.match.profile_filter import FilterResult
-from src.match.profile_filter import evaluate as profile_evaluate
 
 log = structlog.get_logger()
 
 # Stand-in verdict for vacancies whose candidates are not screened by the sales
 # portrait — the recruiter reads the card instead.
-_ACCEPTED = FilterResult(accepted=True, reason="intake_only_vacancy")
 
 SOURCE = "robotaua_response"
 CURSOR_NAME = "robotaua_cursor.json"
@@ -193,6 +190,9 @@ def _start_cooldown(cursor: dict) -> None:
     cursor["blocked_until"] = until.isoformat(timespec="seconds")
     cursor["block_strikes"] = strikes
     save_cursor(cursor)
+    # Tell the chat poller too -- same address, same flag.
+    from src.integrations.robotaua_api import note_block
+    note_block(minutes, who="responses")
     log.warning(
         "robotaua.cooldown_started",
         minutes=minutes,
@@ -224,23 +224,29 @@ async def _ingest_one(
     """
     route = vacancies.for_robotaua(fields.get("vacancy_id")) or vacancies.DEFAULT
 
-    # The portrait below is the sales one. An intake-only vacancy has its own
-    # requirements and a human reads the card, so it goes straight through.
-    profile = _ACCEPTED if not route.screen_enabled else profile_evaluate(
-        full_name=fields["full_name"],
-        region=fields.get("region_raw"),
-        desired_position=fields.get("desired_position"),
-        resume_text=fields.get("resume_text"),
-        experience_text=fields.get("resume_text"),
-        birth_year=fields.get("birth_year"),
-    )
-    if not profile.accepted:
-        stats.profile_rejected += 1
+    # 2026-09-04 policy change: someone who responded to the vacancy himself
+    # always gets a card -- age/region/role no longer gate intake, only
+    # whether Єва calls (see IngestPayload.is_response / InboundRouter.ingest).
+    # The portrait filter used to run here and silently drop the applicant
+    # before router.ingest() ever saw them; that is exactly what the
+    # recruiters asked to stop.
+
+    # 2026-09-04 fix, same day: this guard is NOT the portrait filter that was
+    # just removed -- it does not look at age/region/role at all. It is the
+    # single choke point for every call site that reaches this function
+    # (auto-open, attached-file, already-visible-phone, pending recovery), so
+    # it is the one place that reliably tells `Interaction` (robota.ua showing
+    # a view or an algorithmic recommendation) apart from someone who actually
+    # applied. Without it, three unrelated profiles reached the CRM as
+    # "genuine responses" within minutes of the region/role removal deploying.
+    # See worth_opening()'s docstring for the full incident.
+    if str(fields.get("resume_type") or "") == "Interaction":
+        stats.rejected += 1
         log.info(
-            "robotaua.profile_rejected",
+            "robotaua.ingest_rejected",
             apply=fields["apply_id"],
-            name=fields["full_name"],
-            reason=profile.reason,
+            reason="interaction_not_a_response",
+            vacancy=fields.get("vacancy_id"),
         )
         return True
 
@@ -264,9 +270,11 @@ async def _ingest_one(
             work_ua_url=fields.get("resume_url"),
             resume_text=fields.get("resume_text") or None,
             source=SOURCE,
+            response_date=parse_add_date(fields.get("applied_at")),
             vacancy_id=vacancies.LOCAL_FK,  # local FK; robota.ua id lives in the log
             vacancy_key=route.key,
             board_vacancy_id=fields.get("vacancy_id"),
+            is_response=True,
         )
     )
     if not result.accepted:
@@ -370,44 +378,38 @@ def fit_score(apply: dict, route) -> int:
 def worth_opening(apply: dict, region: str | None) -> bool:
     """Is this parked apply worth one of the account's paid contact openings?
 
-    The per-vacancy switch is the veto: `open_paid_contacts` off means never,
-    whatever else is true.
+    2026-09-04 policy change: everyone who responded to the vacancy HIMSELF
+    gets a card regardless of region/role/age -- the portrait filter now only
+    decides who Єва calls, not who reaches the CRM. The region/title guards
+    that used to sit here would just be the same filtering, moved one step
+    earlier -- exactly what was asked to stop.
 
-    Past that, the question splits by what happens to the person next.
+    2026-09-04 fix, same day: removing that filter also removed the only
+    thing standing between `worth_opening` and `Interaction`-type records --
+    which are NOT a response at all. Per the fit_score() docstring above,
+    `Interaction` (~85% of robota.ua's applies feed) is robota.ua surfacing a
+    view or an algorithmic recommendation; only `AttachedFile`/`Notepad`
+    (APPLIED_TYPES) mean the person deliberately answered the posting. Without
+    this guard, three completely unrelated profiles (a customs lawyer, an
+    e-government IT admin, an account manager) got their contacts opened and
+    cards created within minutes of deploying the region/role removal --
+    spending paid opens on people who never responded to anything, because
+    nothing else was left to tell `Interaction` apart from a real reply. This
+    is not a portrait filter (it does not look at age/region/role at all) --
+    it is the ground-truth signal for "did this person apply himself", which
+    is the one thing the policy change was never meant to remove.
 
-    For a vacancy Eva dials, an opening only pays off if the intake would keep
-    them, so the sales guards stand: whitelisted oblast, sales/logistics title.
-    A first pass over the 49 parked applies found 44 sitting in oblasts the geo
-    filter blocks — every one of those would have been an opening burnt to reveal
-    a number nobody was allowed to call.
-
-    For an intake-only vacancy neither guard applies. Both are shaped for the
-    sales portrait, and such a vacancy has its own geo and its own requirements
-    with a human reading the card. Worse, robota.ua sends most records as
-    `Interaction`, which carries no speciality and no phone — so the title test
-    refuses nearly all of them and the vacancy produces almost no cards at all.
-    That is the state the client wrote in about: applicants plainly visible in
-    the robota.ua cabinet and absent from the CRM.
-
-    Openings are prepaid and expire on a date whether or not they are spent, so
-    for a vacancy a recruiter works by hand the useful question is only whether
-    the vacancy wants them opened.
+    The vacancy's own switch for paid opens (`open_paid_contacts`) is a
+    separate, cost/feature toggle a recruiter sets per vacancy -- kept as the
+    other veto. `fit_score`/`ROLE_MARKERS` stay defined below in case a real
+    per-vacancy cost cap is wanted later; they are still not read from here.
     """
     route = vacancies.for_robotaua(apply.get("vacancyId"))
     if route is not None and not route.open_paid_contacts:
         return False
-    if route is not None and not route.screen_enabled:
-        # Nobody dials these, so the sales guards below say nothing useful. What
-        # does matter is not burning a limited pool on people the recruiter
-        # would not look at twice.
-        return fit_score(apply, route) >= _env_int("ROBOTAUA_MIN_FIT", MIN_FIT_DEFAULT)
-    if not region:
+    if str(apply.get("resumeType") or "") == "Interaction":
         return False
-    s = get_settings()
-    if not is_region_allowed(normalize_region(region), s.regions_allowed, s.regions_blocked):
-        return False
-    spec = (apply.get("speciality") or "").lower()
-    return any(marker in spec for marker in ROLE_MARKERS)
+    return True
 
 
 def _pending_as_apply(apply_id: str, entry: dict) -> dict:
@@ -616,7 +618,12 @@ async def poll_responses(
     router = router or InboundRouter()
 
     cursor = load_cursor()
+    from src.integrations.robotaua_api import blocked_until as _shared_block
+    _shared = _shared_block()
     blocked_until = parse_add_date(cursor.get("blocked_until"))
+    if _shared and (not blocked_until or _shared > blocked_until):
+        blocked_until = _shared
+        cursor["blocked_until"] = _shared.isoformat(timespec="seconds")
     if blocked_until and datetime.utcnow() < blocked_until:
         # Cloudflare flagged the IP; polling through the block only keeps the
         # flag alive, so sit out until the cooldown expires.
