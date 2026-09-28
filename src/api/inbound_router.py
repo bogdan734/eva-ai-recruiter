@@ -246,22 +246,6 @@ class InboundRouter:
                 status=existing.status,
             )
 
-    async def _card_is_fresh(self, lead_id: int, route) -> bool:
-        """Did this person get a card in this funnel within the last day? A CRM
-        that cannot answer counts as no: the client wants every application seen,
-        and a rare extra card is the smaller harm."""
-        try:
-            age = await self._keycrm.card_age(lead_id)
-        except Exception:  # noqa: BLE001
-            return False
-        if age is None:
-            return False
-        pipeline_id, created = age
-        if created.tzinfo is None:
-            created = created.replace(tzinfo=timezone.utc)
-        return (pipeline_id == (route.keycrm_pipeline_id or FUNNEL_ID)
-                and datetime.now(timezone.utc) - created < timedelta(hours=24))
-
     async def _has_live_card(self, existing: Candidate) -> bool:
         """Does this row still point at a card that exists, in any funnel?
 
@@ -348,22 +332,13 @@ class InboundRouter:
                         existing_lead_id=existing.keycrm_lead_id,
                     )
                 elif payload.is_response:
-                    # 28.09.2026, the client: a repeat application must show up in
-                    # CRM like any other — its own card in «Новий». Only the same
-                    # person applying to a second posting within a day is one
-                    # application, noted on the card it already made. This path
-                    # used to hang on route.calls_enabled; with calls off it fell
-                    # to the plain duplicate return below and vanished silently.
+                    # 28.09.2026, the client (agreed with the recruiter): every
+                    # application lands in «Новий» as its own card, repeats too —
+                    # even several on one day. No first/second/repeat sorting; the
+                    # previous card's number is only mentioned in the new card.
+                    # This path used to hang on route.calls_enabled; with calls off
+                    # it fell to the plain duplicate return below and vanished.
                     previous_lead = int(existing.keycrm_lead_id or 0)
-                    if previous_lead and await self._card_is_fresh(previous_lead, route):
-                        await self._note_repeat_response(existing, payload, route)
-                        return IngestResult(
-                            accepted=True,
-                            duplicate=True,
-                            candidate_id=existing.id,
-                            keycrm_lead_id=previous_lead,
-                            reason="same_day_repeat",
-                        )
                     log.info(
                         "ingest.repeat_gets_own_card",
                         candidate_id=existing.id,
@@ -574,15 +549,6 @@ class InboundRouter:
             # our code needs to find it again.
             if cand_db and not cand_db.keycrm_lead_id:
                 cand_db.keycrm_lead_id = lead_id
-
-        if repeat_of and lead_id:
-            when = (payload.response_date or datetime.utcnow()).strftime("%d.%m.%Y %H:%M")
-            try:
-                await self._keycrm.append_manager_comment(
-                    repeat_of, f"🔁 повторний відгук {when} → нова картка #{lead_id}"
-                )
-            except Exception:  # noqa: BLE001 — the old card may be gone; the new one stands
-                log.info("ingest.repeat_old_card_not_noted", old_lead_id=repeat_of)
 
         log.info(
             "inbound.card_created",

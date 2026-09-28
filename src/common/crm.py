@@ -70,8 +70,6 @@ class CRMClient(Protocol):
     async def live_card_status(self, lead_id: int) -> int | None:
         """Stage, or None only for a deleted card. MUST raise when the CRM can't answer."""
     async def card_pipeline(self, lead_id: int) -> int | None: ...
-    async def card_age(self, lead_id: int) -> tuple[int, Any] | None:
-        """(pipeline_id, created_at), None for a deleted card; raises when the CRM can't answer."""
     async def link_card_to_buyer(self, card_id: int, buyer_id: int) -> None: ...
 
     # --- moving through the funnel ---

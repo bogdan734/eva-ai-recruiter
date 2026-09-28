@@ -164,7 +164,7 @@ async def test_repeat_response_whose_card_was_deleted_gets_a_new_one(db):
 
 
 @pytest.mark.asyncio
-async def test_repeat_response_with_a_live_card_gets_a_new_one_pointing_back(db):
+async def test_repeat_response_with_a_live_card_gets_a_new_one(db):
     # 28.09.2026, the client: a repeat application is a new card, whatever the old
     # one is doing — the old card only gets a pointer to it.
     cid = await _seed(db, keycrm_lead_id=555, status=CandidateStatus.MANAGER_REVIEW)
@@ -175,7 +175,7 @@ async def test_repeat_response_with_a_live_card_gets_a_new_one_pointing_back(db)
     assert len(crm.created) == 1
     assert "попередня картка #555" in crm.created[0]["manager_comment"]
     assert result.duplicate is False
-    assert [lead for lead, _ in crm.comments] == [555]
+    assert crm.comments == []
     assert await _lead_id(db, cid) == 9001
 
 

@@ -1,12 +1,10 @@
 """InboundRouter.ingest()'s repeat-application path (src/api/inbound_router.py).
 
 07.09.2026: a repeat robota.ua/work.ua response used to vanish in silence; it
-became a comment on the existing card. 28.09.2026, the client: a repeat
-application must show up in CRM like any other — its own new card in «Новий»,
-marked with the previous card's number, while the old card gets a pointer to
-the new one. The one exception is the same person applying to two postings
-within a day (seen two minutes apart): that is one application, noted on the
-card it already made.
+became a comment on the existing card — which KeyCRM never applied (it answers
+202 to a comment edit and changes nothing), so nobody saw it. 28.09.2026, the
+client with the recruiter: every application is its own new card in «Новий»,
+repeats too, several a day included; the new card names the previous one.
 """
 from __future__ import annotations
 
@@ -117,7 +115,9 @@ async def test_repeat_application_gets_its_own_new_card(db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_old_card_points_to_the_new_one_and_stays_put(db, monkeypatch):
+async def test_old_card_is_left_as_it_is(db, monkeypatch):
+    # KeyCRM ignores edits to an existing card's comment (202, no change), so the
+    # old card is not touched at all; the new card names it instead.
     monkeypatch.setattr("src.api.inbound_router.session_scope", _autocommitting(db), raising=False)
     await _seed(db, status=CandidateStatus.INTERVIEW_SCHEDULED)
     crm = _FakeCRM()
@@ -125,8 +125,7 @@ async def test_old_card_points_to_the_new_one_and_stays_put(db, monkeypatch):
 
     await router.ingest(_payload())
 
-    assert [c for c in crm.comments if c[0] == 555]
-    assert "#777" in [c for c in crm.comments if c[0] == 555][0][1]
+    assert crm.comments == []
     assert crm.moves == []
 
 
@@ -147,18 +146,20 @@ async def test_closed_or_unreachable_person_applying_again_gets_a_new_card(db, m
 
 
 @pytest.mark.asyncio
-async def test_second_posting_the_same_day_is_one_application(db, monkeypatch):
+async def test_even_a_same_day_repeat_gets_its_own_card(db, monkeypatch):
+    # The client, 28.09 (agreed with the recruiter): every application is a card
+    # in «Новий», also several from one person on one day.
     monkeypatch.setattr("src.api.inbound_router.session_scope", _autocommitting(db), raising=False)
     await _seed(db, status=CandidateStatus.MANAGER_REVIEW)
     crm = _FakeCRM()
     crm.age = (1, datetime.now(UTC) - timedelta(minutes=2))
     router = InboundRouter(keycrm=crm)
 
-    result = await router.ingest(_payload())
+    first = await router.ingest(_payload())
+    second = await router.ingest(_payload())
 
-    assert result.duplicate is True
-    assert crm.created == []
-    assert crm.comments and "повторний відгук" in crm.comments[0][1]
+    assert first.duplicate is False and second.duplicate is False
+    assert len(crm.created) == 2
 
 
 @pytest.mark.asyncio
