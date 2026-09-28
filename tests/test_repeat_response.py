@@ -1,18 +1,17 @@
-"""InboundRouter.ingest()'s local-duplicate path (src/api/inbound_router.py).
+"""InboundRouter.ingest()'s repeat-application path (src/api/inbound_router.py).
 
-07.09.2026: a repeat robota.ua/work.ua response for a phone we already have a
-card for used to return in total silence -- no comment, no status change,
-nothing a recruiter could see short of manually re-checking robota.ua by hand
-(the Таран Максим case). Now: any repeat *response* (payload.is_response=True)
-gets a comment on the existing card noting the reapplication; a card sitting
-in a give-up state (closed/unreachable) is also reopened into manager_review
-and moved back to the vacancy's entry stage in KeyCRM, so it is not lost
-forever. A card being actively worked (any other status) is left exactly
-where it is -- only the comment is added.
+07.09.2026: a repeat robota.ua/work.ua response used to vanish in silence; it
+became a comment on the existing card. 28.09.2026, the client: a repeat
+application must show up in CRM like any other — its own new card in «Новий»,
+marked with the previous card's number, while the old card gets a pointer to
+the new one. The one exception is the same person applying to two postings
+within a day (seen two minutes apart): that is one application, noted on the
+card it already made.
 """
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -46,6 +45,11 @@ class _FakeCRM:
 
     async def card_pipeline(self, lead_id):
         return 1  # the card is alive
+
+    async def card_age(self, lead_id):
+        return self.age
+
+    age = (1, datetime.now(UTC) - timedelta(days=3))  # (pipeline, created_at)
 
     async def create_lead(self, **kw):
         self.created.append(kw)
@@ -96,23 +100,24 @@ def _payload(**kw) -> IngestPayload:
 
 
 @pytest.mark.asyncio
-async def test_repeat_response_comments_on_the_existing_card(db, monkeypatch):
+async def test_repeat_application_gets_its_own_new_card(db, monkeypatch):
     monkeypatch.setattr("src.api.inbound_router.session_scope", _autocommitting(db), raising=False)
-    await _seed(db, status=CandidateStatus.INTERVIEW_SCHEDULED)
+    cid = await _seed(db, status=CandidateStatus.MANAGER_REVIEW)
     crm = _FakeCRM()
     router = InboundRouter(keycrm=crm)
 
     result = await router.ingest(_payload())
 
-    assert result.duplicate is True
-    assert len(crm.comments) == 1
-    lead_id, note = crm.comments[0]
-    assert lead_id == 555
-    assert "повторний відгук" in note
+    assert result.duplicate is False
+    assert len(crm.created) == 1
+    assert "попередня картка #555" in crm.created[0]["manager_comment"]
+    assert result.keycrm_lead_id == 777
+    async with db() as session:
+        assert (await session.get(Candidate, cid)).keycrm_lead_id == 777
 
 
 @pytest.mark.asyncio
-async def test_actively_worked_card_is_not_moved(db, monkeypatch):
+async def test_old_card_points_to_the_new_one_and_stays_put(db, monkeypatch):
     monkeypatch.setattr("src.api.inbound_router.session_scope", _autocommitting(db), raising=False)
     await _seed(db, status=CandidateStatus.INTERVIEW_SCHEDULED)
     crm = _FakeCRM()
@@ -120,35 +125,40 @@ async def test_actively_worked_card_is_not_moved(db, monkeypatch):
 
     await router.ingest(_payload())
 
+    assert [c for c in crm.comments if c[0] == 555]
+    assert "#777" in [c for c in crm.comments if c[0] == 555][0][1]
     assert crm.moves == []
 
 
 @pytest.mark.asyncio
-async def test_closed_card_is_reactivated_and_moved(db, monkeypatch):
+async def test_closed_or_unreachable_person_applying_again_gets_a_new_card(db, monkeypatch):
     monkeypatch.setattr("src.api.inbound_router.session_scope", _autocommitting(db), raising=False)
-    cid = await _seed(db, status=CandidateStatus.CLOSED)
-    crm = _FakeCRM()
-    router = InboundRouter(keycrm=crm)
+    for status, phone in ((CandidateStatus.CLOSED, "+380991112233"),
+                          (CandidateStatus.UNREACHABLE, "+380991112244")):
+        cid = await _seed(db, status=status, phone_e164=phone)
+        crm = _FakeCRM()
+        router = InboundRouter(keycrm=crm)
 
-    await router.ingest(_payload())
+        await router.ingest(_payload(phone_raw=phone))
 
-    expected_stage = vacancies.all_vacancies()["sales"].keycrm_status_id
-    assert crm.moves == [(555, expected_stage)]
-    async with db() as session:
-        refreshed = await session.get(Candidate, cid)
-        assert refreshed.status == CandidateStatus.MANAGER_REVIEW
+        assert len(crm.created) == 1, status
+        async with db() as session:
+            assert (await session.get(Candidate, cid)).status == CandidateStatus.MANAGER_REVIEW
 
 
 @pytest.mark.asyncio
-async def test_unreachable_card_is_also_reactivated(db, monkeypatch):
+async def test_second_posting_the_same_day_is_one_application(db, monkeypatch):
     monkeypatch.setattr("src.api.inbound_router.session_scope", _autocommitting(db), raising=False)
-    await _seed(db, status=CandidateStatus.UNREACHABLE)
+    await _seed(db, status=CandidateStatus.MANAGER_REVIEW)
     crm = _FakeCRM()
+    crm.age = (1, datetime.now(UTC) - timedelta(minutes=2))
     router = InboundRouter(keycrm=crm)
 
-    await router.ingest(_payload())
+    result = await router.ingest(_payload())
 
-    assert len(crm.moves) == 1
+    assert result.duplicate is True
+    assert crm.created == []
+    assert crm.comments and "повторний відгук" in crm.comments[0][1]
 
 
 @pytest.mark.asyncio

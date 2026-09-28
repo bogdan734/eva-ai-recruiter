@@ -56,6 +56,10 @@ class _FakeCRM:
             raise RuntimeError("KeyCRM unreachable")
         return self._pipelines.get(lead_id)
 
+    async def card_age(self, lead_id):
+        pipeline = await self.card_pipeline(lead_id)
+        return None if pipeline is None else (pipeline, datetime.now(timezone.utc) - timedelta(days=3))
+
     async def append_manager_comment(self, lead_id, addition):
         self.comments.append((lead_id, addition))
         return {}
@@ -160,28 +164,30 @@ async def test_repeat_response_whose_card_was_deleted_gets_a_new_one(db):
 
 
 @pytest.mark.asyncio
-async def test_repeat_response_with_a_live_card_only_annotates_it(db):
+async def test_repeat_response_with_a_live_card_gets_a_new_one_pointing_back(db):
+    # 28.09.2026, the client: a repeat application is a new card, whatever the old
+    # one is doing — the old card only gets a pointer to it.
     cid = await _seed(db, keycrm_lead_id=555, status=CandidateStatus.MANAGER_REVIEW)
-    # Moved on to a later funnel by the recruiter: still a live card, not ours to redo.
     crm = _FakeCRM(pipelines={555: 2})
 
     result = await InboundRouter(keycrm=crm).ingest(_response())
 
-    assert crm.created == []
-    assert result.duplicate is True
+    assert len(crm.created) == 1
+    assert "попередня картка #555" in crm.created[0]["manager_comment"]
+    assert result.duplicate is False
     assert [lead for lead, _ in crm.comments] == [555]
-    assert await _lead_id(db, cid) == 555
+    assert await _lead_id(db, cid) == 9001
 
 
 @pytest.mark.asyncio
-async def test_unreachable_crm_never_reads_as_a_deleted_card(db):
+async def test_repeat_application_is_not_swallowed_when_crm_cannot_tell_its_age(db):
     await _seed(db, keycrm_lead_id=555, status=CandidateStatus.MANAGER_REVIEW)
     crm = _FakeCRM(lookup_fails=True)
 
     result = await InboundRouter(keycrm=crm).ingest(_response())
 
-    assert crm.created == []
-    assert result.duplicate is True
+    assert len(crm.created) == 1
+    assert result.duplicate is False
 
 
 class _FlakyCRM(_FakeCRM):

@@ -13,6 +13,7 @@ Live structure discovered 2026-06-23:
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -315,6 +316,17 @@ class KeyCRMClient:
         if sid is None:
             raise ValueError(f"card {lead_id} came back without status_id")
         return int(sid)
+
+    async def card_age(self, lead_id: int) -> tuple[int, datetime] | None:
+        """(pipeline_id, created_at) of a card; None if it was deleted. Raises when
+        KeyCRM cannot answer."""
+        r = await self._get_rate_limited(f"/pipelines/cards/{lead_id}")
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        data = r.json() or {}
+        created = datetime.fromisoformat(str(data.get("created_at")).replace("Z", "+00:00"))
+        return int(data.get("pipeline_id") or 0), created
 
     async def card_pipeline(self, lead_id: int) -> int | None:
         """Which funnel this card is in, or None if it no longer exists.
