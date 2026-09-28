@@ -107,7 +107,8 @@ async def handle_tg_silenced(
             except Exception as e:  # noqa: BLE001 — the alert matters more than the label
                 log.warning("tg.silenced_card_lookup_failed", lead_id=lead_id, error=str(e))
 
-        shown_phone = cand.phone_e164 if cand and cand.phone_e164.startswith("+") else (norm or phone)
+        real = cand is not None and cand.phone_e164.startswith("+")
+        shown_phone = cand.phone_e164 if real else (norm or phone)
         delivered = await alert_admins(alert_text(
             name=(cand.full_name if cand else "") or name,
             username=username,

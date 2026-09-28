@@ -7,6 +7,7 @@
      GET  /health            -> {ok, me, active, sent_today, limit}
      GET  /stats             -> {sent_today, limit, active}
      POST /send  {target,name} -> надіслати інтро кандидату
+     POST /send_text {peer,text} -> погоджений текст в існуючий діалог (X-Internal-Token)
      POST /toggle            -> увімк/вимк активність (пауза)
      POST /limit {value}     -> денний ліміт нових діалогів
 """
@@ -358,6 +359,40 @@ async def h_send_outreach(request):
     return web.json_response(res)
 
 
+async def h_send_text(request):
+    """Send a fixed, human-approved text into a dialog Eva already has.
+
+    For replies a person decided on — an apology for a long silence, closing a
+    conversation — not for first contact: the peer must already be in the history,
+    so this cannot route around the daily limit and anti-spam checks of /send.
+    """
+    if request.headers.get("X-Internal-Token") != INTERNAL_API_TOKEN:
+        return web.json_response({"ok": False, "error": "bad token"}, status=401)
+    if not STATE.get("active", True):
+        return web.json_response({"ok": False, "error": "Розсилку поставлено на паузу"})
+    body = await request.json()
+    peer = str(body.get("peer", "")).strip()
+    text = str(body.get("text", "")).strip()
+    if not peer.isdigit() or not text:
+        return web.json_response({"ok": False, "error": "peer and text required"}, status=400)
+    if not store.history(peer, limit=1):
+        return web.json_response({"ok": False, "error": "no dialog with this peer"}, status=404)
+    try:
+        entity = await client.get_entity(int(peer))
+        await human_typing(entity, text)
+        await client.send_message(entity, text)
+    except PeerFloodError:
+        STATE["active"] = False
+        _save_state(STATE)
+        return web.json_response({"ok": False, "error": "PeerFloodError — акаунт обмежено"})
+    except FloodWaitError as e:
+        return web.json_response({"ok": False, "error": f"FloodWait {e.seconds}s"})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)[:200]})
+    store.log_message(peer, "assistant", text)
+    return web.json_response({"ok": True, "peer": peer})
+
+
 async def h_toggle(request):
     STATE["active"] = not STATE.get("active", True)
     _save_state(STATE)
@@ -441,6 +476,7 @@ def build_web_app() -> web.Application:
         web.post("/send", h_send),
         web.post("/send_form", h_send_form),
         web.post("/send_outreach", h_send_outreach),
+        web.post("/send_text", h_send_text),
         web.post("/toggle", h_toggle),
         web.post("/limit", h_limit),
         web.post("/catchup", h_catchup),
@@ -631,6 +667,40 @@ async def _report_tokens(resp) -> None:
         print(f"[token-usage error] {e}", flush=True)
 
 
+async def _forward_silenced(peer: str, sender) -> None:
+    """Eva may not answer — make sure a human sees what the candidate wrote.
+
+    Until 28.09 the gate's silence was the end of it: the reply stayed in Eva's
+    chats, which no recruiter reads. One alert per new message; if the API could
+    not reach anyone, nothing is marked and the next message or sweep retries.
+    """
+    msg_id, texts = store.unanswered_tail(peer)
+    if not msg_id or store.silenced_alert_sent(peer, msg_id):
+        return
+    payload = {
+        "peer_id": peer,
+        "name": " ".join(filter(None, [getattr(sender, "first_name", None),
+                                        getattr(sender, "last_name", None)])) or "",
+        "username": getattr(sender, "username", None),
+        "phone": store.get_peer_phone(peer),
+        "messages": texts[-5:],
+    }
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(
+                f"{API_URL}/internal/tg-silenced",
+                json=payload,
+                headers={"X-Internal-Token": INTERNAL_API_TOKEN},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as r:
+                body = await r.json(content_type=None)
+                if r.status == 200 and body.get("ok"):
+                    store.mark_silenced_alert(peer, msg_id)
+                print(f"[tg-silenced] peer={peer} -> {r.status} {str(body)[:120]}", flush=True)
+    except Exception as e:
+        print(f"[tg-silenced error] {e}", flush=True)
+
+
 async def _should_engage(peer: str, phone: str | None) -> bool:
     """Ask the API whether Eva should still talk to this peer. Once a candidate has
     been handed to a recruiter (manager_review/interview/closed), the API says no and
@@ -685,9 +755,10 @@ async def on_message(event):
         return  # a newer message arrived — that handler answers the whole burst
 
     # Once a recruiter owns this candidate (handed off), Eva stays silent. The
-    # incoming message is already stored above; we just don't reply.
+    # incoming message is already stored above; the recruiters get it instead.
     if not await _should_engage(peer, store.get_peer_phone(peer)):
         print(f"[tg-gate] silent — recruiter owns peer={peer}", flush=True)
+        await _forward_silenced(peer, sender)
         return
 
     msgs = store.history(peer)
@@ -790,6 +861,8 @@ async def catch_up_unread(max_dialogs: int = 20, dry_run: bool = False,
 
             if not await _should_engage(peer, store.get_peer_phone(peer)):
                 skipped.append({"peer": peer, "who": who, "why": "recruiter_owns"})
+                if not dry_run:
+                    await _forward_silenced(peer, sender)
                 continue
 
             msgs = store.history(peer)
