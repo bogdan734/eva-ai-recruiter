@@ -46,6 +46,12 @@ async def run_cold_sourcing_cycle() -> dict:
     if not s.workua_cold_sourcing_enabled:
         log.info("cold_sourcing.disabled")
         return {"skipped": "disabled"}
+    from src.bot.admin import calls_paused
+    if calls_paused():
+        # /pause in the bot stops Eva reaching out — and every sourced person
+        # costs a paid work.ua open to feed calls that would not happen.
+        log.info("cold_sourcing.paused")
+        return {"skipped": "paused"}
 
     remaining = s.workua_cold_sourcing_max_per_run
     # One allowance for the whole run, not one per vacancy: work.ua counts

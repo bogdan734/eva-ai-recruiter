@@ -2,7 +2,8 @@
 
 Authorized users only (chat_id in TG_ADMIN_CHAT_IDS). Lets you:
 - /status — services + key counters
-- /pause / /resume — gate the call scheduler
+- /pause / /resume — gate calls, cold sourcing, Telegram outreach, paid opens
+- /pause_hiring / /resume_hiring — Eva offers the talent reserve instead
 - /pause_workua / /resume_workua — gate the work.ua poller
 - /pause_robotaua / /resume_robotaua — gate the robota.ua poller
 - /costs, /set_balance — metered spend and what is left of a top-up
@@ -128,7 +129,8 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         funnel_lines = "\n".join(f"├ {k}: {v}" for k, v in sorted(funnel.items())) or "├ _(порожньо)_"
         text = (
             "*Статус AI Recruiter*\n\n"
-            f"📞 Дзвонилка: {calls_state}\n"
+            f"📞 Дзвінки, пошук, розсилка: {calls_state}\n"
+            f"🗂 Набір: {'⏸ ПАУЗА (кадровий резерв)' if hiring_paused() else '🟢 ВІДКРИТО'}\n"
             f"🔍 work.ua пуллер: {wua_state}\n"
             f"{rua_line}\n"
             f"🎯 Match threshold: `{threshold}`\n\n"
@@ -143,7 +145,10 @@ async def cmd_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     async def _do(u, c):
         _state["calls_paused"] = True
         _save_state()
-        await u.message.reply_text("⏸ Дзвонилку зупинено. `/resume` щоб запустити.")
+        await u.message.reply_text(
+            "⏸ Пауза: дзвінки, холодний пошук, розсилка в Telegram і платні відкриття "
+            "контактів зупинені. Відгуки з сайтів і далі падають у CRM. `/resume` — запустити."
+        )
     await _guarded(update, ctx, _do)
 
 
@@ -151,7 +156,26 @@ async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     async def _do(u, c):
         _state["calls_paused"] = False
         _save_state()
-        await u.message.reply_text("🟢 Дзвонилка активна.")
+        await u.message.reply_text("🟢 Дзвінки, пошук, розсилка й відкриття контактів активні.")
+    await _guarded(update, ctx, _do)
+
+
+async def cmd_pause_hiring(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _do(u, c):
+        _state["hiring_paused"] = True
+        _save_state()
+        await u.message.reply_text(
+            "🗂 Набір на паузі: Єва в Telegram каже про це і пропонує кадровий резерв; "
+            "хто підходить — у «Кадровий резерв». `/resume_hiring` — звичайний режим."
+        )
+    await _guarded(update, ctx, _do)
+
+
+async def cmd_resume_hiring(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _do(u, c):
+        _state["hiring_paused"] = False
+        _save_state()
+        await u.message.reply_text("🟢 Набір відкрито: хто підходить — у «Відібрано».")
     await _guarded(update, ctx, _do)
 
 
@@ -520,8 +544,10 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "`/params` — налаштування .env\n"
         "`/report` — згенерувати звіт зараз\n\n"
         "⏸ Контроль:\n"
-        "`/pause` — зупинити дзвонилку\n"
+        "`/pause` — зупинити дзвінки, пошук, розсилку й платні відкриття\n"
         "`/resume` — продовжити\n"
+        "`/pause_hiring` — набір на паузі: Єва пропонує кадровий резерв\n"
+        "`/resume_hiring` — звичайний набір\n"
         "`/pause_workua` — зупинити пуллер work.ua\n"
         "`/resume_workua` — продовжити\n"
         "`/costs` — витрати й залишки на балансах\n"
@@ -541,6 +567,8 @@ def register_admin_handlers(app) -> None:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
+    app.add_handler(CommandHandler("pause_hiring", cmd_pause_hiring))
+    app.add_handler(CommandHandler("resume_hiring", cmd_resume_hiring))
     app.add_handler(CommandHandler("pause_workua", cmd_pause_workua))
     app.add_handler(CommandHandler("resume_workua", cmd_resume_workua))
     app.add_handler(CommandHandler("pause_robotaua", cmd_pause_robotaua))

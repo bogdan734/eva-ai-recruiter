@@ -427,6 +427,10 @@ async def send_backfill_outreach() -> None:
     of people here. The userbot caps how many go out a day, so this runs until
     it says stop and picks the rest up tomorrow.
     """
+    from src.bot.admin import calls_paused
+    if calls_paused():  # /pause stops Eva reaching out, in Telegram too
+        log.info("outreach.backfill paused")
+        return
     try:
         from src.integrations.tg_outreach import configured_start, run_once
         start = configured_start()

@@ -409,7 +409,10 @@ def worth_opening(apply: dict, region: str | None) -> bool:
         return False
     if str(apply.get("resumeType") or "") == "Interaction":
         return False
-    return True
+    from src.bot.admin import calls_paused
+    # /pause in the bot stops spending too; the apply waits in pending and is
+    # opened after /resume.
+    return not calls_paused()
 
 
 def _parked_entry(apply: dict) -> dict:
