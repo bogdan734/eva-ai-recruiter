@@ -126,3 +126,13 @@ class TgProgressPayload(BaseModel):
     username: str | None = None
     phone: str | None = None
     transcript: str = ""
+
+
+class TgSilencedPayload(BaseModel):
+    """A candidate wrote while the tg-gate kept Eva quiet — what they wrote since
+    Eva's last message, oldest first, for the recruiters to answer."""
+    peer_id: str
+    name: str = ""
+    username: str | None = None
+    phone: str | None = None
+    messages: list[str] = []

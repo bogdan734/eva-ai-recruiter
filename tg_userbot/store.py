@@ -20,6 +20,10 @@ def _conn():
     c.execute("""CREATE TABLE IF NOT EXISTS outreach_log(
         id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT, kind TEXT,
         ok INTEGER, reason TEXT, ts REAL)""")
+    # Newest candidate message the recruiters were told about while Eva had to stay
+    # quiet — so a restart or a second sweep does not ping them twice for it.
+    c.execute("""CREATE TABLE IF NOT EXISTS silenced_alerts(
+        peer TEXT PRIMARY KEY, msg_id INTEGER, ts REAL)""")
     return c
 
 
@@ -80,6 +84,35 @@ def history(peer: str, limit: int = 30):
                      "ORDER BY id DESC LIMIT ?", (peer, limit)).fetchall()
     c.close()
     return [{"role": r, "content": t} for r, t in reversed(rows)]
+
+
+def unanswered_tail(peer: str) -> tuple[int | None, list[str]]:
+    """What the candidate wrote after Eva's last word: (id of the newest, texts oldest
+    first). (None, []) when the conversation ends on Eva's message."""
+    c = _conn()
+    last_eva = c.execute("SELECT COALESCE(MAX(id), 0) FROM messages "
+                         "WHERE peer=? AND role='assistant'", (peer,)).fetchone()[0]
+    rows = c.execute("SELECT id, text FROM messages WHERE peer=? AND role='user' "
+                     "AND id>? AND TRIM(text)<>'' ORDER BY id", (peer, last_eva)).fetchall()
+    c.close()
+    if not rows:
+        return None, []
+    return rows[-1][0], [t for _, t in rows]
+
+
+def silenced_alert_sent(peer: str, msg_id: int) -> bool:
+    c = _conn()
+    row = c.execute("SELECT msg_id FROM silenced_alerts WHERE peer=?", (peer,)).fetchone()
+    c.close()
+    return bool(row) and row[0] >= msg_id
+
+
+def mark_silenced_alert(peer: str, msg_id: int) -> None:
+    c = _conn()
+    c.execute("INSERT INTO silenced_alerts(peer,msg_id,ts) VALUES(?,?,?) "
+              "ON CONFLICT(peer) DO UPDATE SET msg_id=excluded.msg_id, ts=excluded.ts",
+              (peer, msg_id, time.time()))
+    c.commit(); c.close()
 
 
 def last_outcome(peer: str) -> str | None:

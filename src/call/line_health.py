@@ -179,20 +179,31 @@ def should_warn() -> bool:
     return True
 
 
-async def alert_admins(text: str) -> None:
-    """Best-effort Telegram shout. A breaker nobody hears about is not a breaker."""
+async def alert_admins(text: str) -> int:
+    """Best-effort Telegram shout. A breaker nobody hears about is not a breaker.
+
+    Returns how many admin chats accepted it. Telegram answers 400 to a chat that
+    never opened the bot (two of the four configured ones, as of 28.09), and that
+    must not count as heard.
+    """
     token = (os.getenv("TG_REPORT_BOT_TOKEN") or "").strip()
     raw = (os.getenv("TG_ADMIN_CHAT_IDS") or "").strip()
     if not token or not raw:
-        return
+        return 0
     import httpx
 
+    delivered = 0
     for chat in [c.strip() for c in raw.split(",") if c.strip()]:
         try:
             async with httpx.AsyncClient(timeout=15) as c:
-                await c.post(
+                r = await c.post(
                     f"https://api.telegram.org/bot{token}/sendMessage",
                     json={"chat_id": chat, "text": text, "parse_mode": "HTML"},
                 )
+            if r.status_code == 200:
+                delivered += 1
+            else:
+                log.warning("line_health.alert_rejected", chat=chat, status=r.status_code)
         except Exception as e:  # noqa: BLE001
             log.warning("line_health.alert_failed", chat=chat, error=str(e))
+    return delivered

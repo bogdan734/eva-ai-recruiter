@@ -18,6 +18,7 @@ from .schemas import (
     VapiWebhookPayload,
     TgOutcomePayload,
     TgProgressPayload,
+    TgSilencedPayload,
     TokenUsagePayload,
     WorkUaInboundPayload,
 )
@@ -269,6 +270,27 @@ async def tg_progress(
         username=payload.username,
         phone=payload.phone,
         transcript=payload.transcript,
+    )
+
+
+@app.post("/internal/tg-silenced")
+async def tg_silenced(
+    payload: TgSilencedPayload,
+    x_internal_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """The gate kept Eva quiet but the candidate wrote — hand it to the recruiters
+    instead of leaving it in chats nobody reads."""
+    s = get_settings()
+    if x_internal_token != s.internal_api_token:
+        raise HTTPException(status_code=401, detail="bad internal token")
+    from src.api.tg_silenced import handle_tg_silenced
+
+    return await handle_tg_silenced(
+        peer_id=payload.peer_id,
+        name=payload.name,
+        username=payload.username,
+        phone=payload.phone,
+        messages=payload.messages,
     )
 
 
