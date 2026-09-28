@@ -250,13 +250,14 @@ async def catch_up_skipped(
         last = resume_from
         pages = 0
         while pages < max_pages:
-            # Both kinds are genuine applications. `phonecall` carries the same
-            # CV, phone and email as `send`; work.ua only tags it differently
-            # (checked against the live feed 23.09.2026). Dropping it created a
-            # gap against the cabinet's own «відгуки» count, which already
-            # includes these rows.
+            # `send` only. A "phonecall" row is the cabinet's «Телефон у
+            # вакансії» -- somebody pressed call and sent nothing; the CV in
+            # the row is work.ua's own profile data, not the candidate's
+            # submission. Verified against the live feed 25.09.2026, see the
+            # module docstring. There is no field that separates a "bare" call
+            # from one with a CV, because every one of them carries a CV.
             page = await client.list_responses(
-                limit=page_size, last_id=last, sort=1, from_types=["send", "phonecall"]
+                limit=page_size, last_id=last, sort=1, from_types=["send"]
             )
             items = page.get("items") or []
             if not items:
@@ -297,10 +298,9 @@ async def poll_responses(
     *,
     client: WorkUaClient | None = None,
     router: InboundRouter | None = None,
-    # On by default: a `phonecall` row is a full application with a CV
-    # attached, not a bare "someone looked at our number" event -- see the
-    # module docstring. The flag stays so a backfill can narrow the pull.
-    include_phonecalls: bool = True,
+    # Off: «Телефон у вакансії» is not a відгук for this client (25.09.2026).
+    # The flag stays so a deliberate one-off backfill can still ask for them.
+    include_phonecalls: bool = False,
     page_size: int = 50,
 ) -> PollStats:
     """Pull new responses since last_id and feed them through InboundRouter.

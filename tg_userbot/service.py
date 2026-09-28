@@ -13,6 +13,7 @@
 import asyncio
 import json
 import os
+from datetime import datetime, timezone
 import random
 
 import aiohttp
@@ -710,6 +711,13 @@ async def on_message(event):
     print(f"[{getattr(sender, 'first_name', peer)}] {text[:50]!r} -> {reply[:50]!r}", flush=True)
 
 
+# How stale a dialogue may be and still be answered by the automatic sweep.
+# A reply that arrives five weeks late needs an apology, not a cheerful
+# continuation, and only a human can decide to send that. Older dialogues are
+# reported as `too_old` so they stay visible instead of silently rotting.
+TG_CATCHUP_MAX_AGE_H = int(os.environ.get("TG_CATCHUP_MAX_AGE_H", "72"))
+
+
 async def catch_up_unread(max_dialogs: int = 20, dry_run: bool = False,
                           only: set[str] | None = None) -> dict:
     """Answer private chats that arrived while Eva was offline.
@@ -728,8 +736,12 @@ async def catch_up_unread(max_dialogs: int = 20, dry_run: bool = False,
         async for dialog in client.iter_dialogs(limit=100):
             if len(answered) >= max_dialogs:
                 break
-            if not dialog.is_user or dialog.unread_count < 1:
+            if not dialog.is_user:
                 continue
+            # Deliberately NOT gated on dialog.unread_count: a colleague opening
+            # the chat in Telegram marks it read, and the candidate would then
+            # wait forever. Whether we owe a reply is decided below, from our
+            # own stored history.
             sender = dialog.entity
             if getattr(sender, "bot", False):
                 continue
@@ -744,18 +756,34 @@ async def catch_up_unread(max_dialogs: int = 20, dry_run: bool = False,
 
             # Store what we missed, oldest first, skipping anything already logged —
             # log_message is a plain INSERT, so the dedupe has to happen here.
-            known = {m["content"] for m in store.history(peer, limit=200)
-                     if m["role"] == "user"}
+            hist = store.history(peer, limit=200)
+            known = {m["content"] for m in hist if m["role"] == "user"}
             missed: list[str] = []
-            async for m in client.iter_messages(sender, limit=min(dialog.unread_count, 20)):
+            scan = max(int(dialog.unread_count or 0), 5)
+            async for m in client.iter_messages(sender, limit=min(scan, 20)):
                 text = incoming_text(m)
                 if m.out or not text or text in known:
                     continue
                 missed.append(text)
             missed.reverse()
-            if not missed:
+
+            # The point of the sweep: does this conversation end on the
+            # candidate's word? A message we stored and never answered counts,
+            # which is precisely what the old `text in known` test threw away.
+            owed = bool(hist) and hist[-1]["role"] == "user"
+            if not missed and not owed:
                 skipped.append({"peer": peer, "who": who, "why": "nothing_new"})
                 continue
+
+            last_msg_at = getattr(dialog, "date", None)
+            if last_msg_at is not None:
+                age_h = (datetime.now(timezone.utc) - last_msg_at).total_seconds() / 3600
+                if age_h > TG_CATCHUP_MAX_AGE_H:
+                    skipped.append({
+                        "peer": peer, "who": who,
+                        "why": f"too_old:{int(age_h / 24)}d",
+                    })
+                    continue
             if not dry_run:
                 for text in missed:
                     store.log_message(peer, "user", text)
