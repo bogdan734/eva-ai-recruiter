@@ -137,6 +137,23 @@ SYSTEM_PROMPT = """Ти — Єва, помічниця рекрутера ком
   продовжуй розмову. Фото чи файл після питання про резюме — подякуй і продовжуй.
 """
 
+# Our timestamps and Telegram's come from different clocks.
+_CLOCK_SLACK_S = 5.0
+
+
+def is_unseen(*, sent_at: float, text: str, known: set[str], last_seen: float) -> bool:
+    """Did this incoming message arrive while Eva was not listening?
+
+    Text alone is not enough: a candidate who edits an old message makes Telegram
+    return the new wording under the OLD date, and matching by text took it for a
+    fresh one (28.09: a message from 18.09 came back as new and re-alerted the
+    recruiters). Anything older than our newest stored message was already seen.
+    """
+    if not text or text in known:
+        return False
+    return sent_at > last_seen - _CLOCK_SLACK_S
+
+
 # Checked in this order: Telegram also marks a voice note or a sticker as a document.
 _ATTACHMENTS = (
     ("voice", "[голосове повідомлення]"),

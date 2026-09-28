@@ -71,3 +71,34 @@ def test_alerts_are_tracked_per_peer(db):
 
     msg8, _ = store.unanswered_tail("8")
     assert not store.silenced_alert_sent("8", msg8)
+
+
+def test_last_seen_is_the_newest_message_either_side(db, monkeypatch):
+    clock = iter([100.0, 200.0, 300.0])
+    monkeypatch.setattr(store.time, "time", lambda: next(clock))
+    store.log_message("7", "user", "Вітаю! Нагадайте будь ласка умови.")
+    store.log_message("7", "assistant", "Перепрошую за паузу…")
+    store.log_message("8", "user", "Інша розмова")
+
+    assert store.last_seen("7") == 200.0
+    assert store.last_seen("9") == 0.0
+
+
+def test_an_edited_old_message_is_not_new(db, monkeypatch):
+    # 18.09 she wrote without commas; later she edited the message and Telegram
+    # now returns the new wording with the OLD date. The sweep must not take it
+    # for a fresh message (it did on 28.09 and re-alerted the recruiters).
+    persona = _load("persona")
+    monkeypatch.setattr(store.time, "time", lambda: 1_000.0)
+    store.log_message("7", "user", "Нагадайте будь ласка умови")
+    store.log_message("7", "assistant", "Перепрошую за паузу…")
+
+    assert persona.is_unseen(sent_at=500.0, text="Нагадайте, будь ласка, умови",
+                             known={"Нагадайте будь ласка умови"},
+                             last_seen=store.last_seen("7"))  is False
+    assert persona.is_unseen(sent_at=1_200.0, text="Так, актуально",
+                             known={"Нагадайте будь ласка умови"},
+                             last_seen=store.last_seen("7")) is True
+    assert persona.is_unseen(sent_at=1_200.0, text="Нагадайте будь ласка умови",
+                             known={"Нагадайте будь ласка умови"},
+                             last_seen=store.last_seen("7")) is False

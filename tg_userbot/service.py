@@ -27,7 +27,7 @@ from telethon.tl.types import InputPhoneContact
 from anthropic import Anthropic
 
 import store
-from persona import SYSTEM_PROMPT as _BASE_PROMPT, INTRO_TEMPLATE, incoming_text
+from persona import SYSTEM_PROMPT as _BASE_PROMPT, INTRO_TEMPLATE, incoming_text, is_unseen
 
 load_dotenv()
 API_ID = int(os.environ["TG_API_ID"])
@@ -834,11 +834,13 @@ async def catch_up_unread(max_dialogs: int = 20, dry_run: bool = False,
             # log_message is a plain INSERT, so the dedupe has to happen here.
             hist = store.history(peer, limit=200)
             known = {m["content"] for m in hist if m["role"] == "user"}
+            seen_until = store.last_seen(peer)
             missed: list[str] = []
             scan = max(int(dialog.unread_count or 0), 5)
             async for m in client.iter_messages(sender, limit=min(scan, 20)):
                 text = incoming_text(m)
-                if m.out or not text or text in known:
+                if m.out or not is_unseen(sent_at=m.date.timestamp(), text=text,
+                                          known=known, last_seen=seen_until):
                     continue
                 missed.append(text)
             missed.reverse()

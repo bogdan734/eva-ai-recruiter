@@ -86,6 +86,14 @@ def history(peer: str, limit: int = 30):
     return [{"role": r, "content": t} for r, t in reversed(rows)]
 
 
+def last_seen(peer: str) -> float:
+    """When we last stored anything for this peer, either side; 0.0 if never."""
+    c = _conn()
+    row = c.execute("SELECT MAX(ts) FROM messages WHERE peer=?", (peer,)).fetchone()
+    c.close()
+    return float(row[0] or 0.0)
+
+
 def unanswered_tail(peer: str) -> tuple[int | None, list[str]]:
     """What the candidate wrote after Eva's last word: (id of the newest, texts oldest
     first). (None, []) when the conversation ends on Eva's message."""
