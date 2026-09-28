@@ -354,7 +354,7 @@ class KeyCRMClient:
         *,
         title: str,
         full_name: str,
-        phone: str,
+        phone: str | None,
         email: str | None = None,
         vacancy_name: str = "Менеджер з продажу",
         vacancy_number: str = "",
@@ -440,7 +440,9 @@ class KeyCRMClient:
         if buyer_id:
             body["contact"] = {"client_id": buyer_id}
         else:
-            body["contact"] = {"full_name": full_name, "phone": phone}
+            body["contact"] = {"full_name": full_name}
+            if phone:  # a hidden-number applicant gets a card with the name only
+                body["contact"]["phone"] = phone
             if email:
                 body["contact"]["email"] = email
         if manager_comment:

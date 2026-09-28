@@ -93,6 +93,10 @@ class IngestPayload:
     # card, because the only reason they exist in our system is for Єва to
     # call them.
     is_response: bool = False
+    # A stand-in for phone_e164 when the board hides the number (robota.ua until a
+    # paid opening), e.g. "rua<apply id>". The client (28.09) wants every applicant
+    # in CRM, phone or not: one row per such application and a card with no phone.
+    no_phone_key: str | None = None
 
 
 @dataclass
@@ -277,6 +281,9 @@ class InboundRouter:
             return IngestResult(accepted=False, reason=f"intake_disabled: {route.key}")
 
         phone = normalize_phone(payload.phone_raw)
+        hidden_phone = False
+        if not phone and payload.no_phone_key:
+            phone, hidden_phone = payload.no_phone_key[:20], True
         if not phone:
             return IngestResult(accepted=False, reason="invalid_phone")
 
@@ -311,6 +318,16 @@ class InboundRouter:
             existing = (
                 await session.execute(select(Candidate).where(Candidate.phone_e164 == phone))
             ).scalar_one_or_none()
+            if existing and hidden_phone:
+                # Keyed by the board's own application id: seeing it again is the
+                # same application, not a repeat one.
+                return IngestResult(
+                    accepted=True,
+                    duplicate=True,
+                    candidate_id=existing.id,
+                    keycrm_lead_id=existing.keycrm_lead_id,
+                    reason="same_application",
+                )
             if existing:
                 merged_source = merge_sources(existing.source, payload.source)
                 if merged_source != existing.source:
@@ -505,7 +522,7 @@ class InboundRouter:
             created = await self._keycrm.create_lead(
                 title=payload.full_name,
                 full_name=payload.full_name,
-                phone=phone,
+                phone=None if hidden_phone else phone,
                 email=payload.email,
                 vacancy_name=route.label or payload.vacancy_name,
                 vacancy_number=_vac_number,
@@ -514,7 +531,9 @@ class InboundRouter:
                 resume_text=payload.resume_text,
                 resume_url=payload.work_ua_url,
                 manager_comment=_format_manager_comment(payload, region)
-                + (f" | 🔁 повторний відгук, попередня картка #{repeat_of}" if repeat_of else ""),
+                + (f" | 🔁 повторний відгук, попередня картка #{repeat_of}" if repeat_of else "")
+                + (" | 📵 телефон прихований на майданчику — відкрийте контакт у кабінеті"
+                   if hidden_phone else ""),
                 pipeline_id=route.keycrm_pipeline_id or FUNNEL_ID,
                 status_id=route.keycrm_status_id or STATUS_NEW,
                 # Label the card with the board the person actually came from.

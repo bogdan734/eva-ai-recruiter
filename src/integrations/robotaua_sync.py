@@ -275,6 +275,7 @@ async def _ingest_one(
             vacancy_key=route.key,
             board_vacancy_id=fields.get("vacancy_id"),
             is_response=True,
+            no_phone_key=fields.get("no_phone_key"),
         )
     )
     if not result.accepted:
@@ -681,6 +682,19 @@ async def _try_auto_open(
     return True
 
 
+async def _ingest_without_phone(
+    router: InboundRouter, apply: dict, cities: dict, stats: RobotaUaPollStats, *, dry: bool
+) -> bool:
+    """A card for a real applicant whose number robota.ua keeps hidden. The client
+    (28.09) wants every applicant in CRM; the recruiter opens the contact in the
+    cabinet if the person is worth it."""
+    fields = parse_apply(apply, cities=cities)
+    fields["phone_raw"] = ""
+    fields["no_phone_key"] = f"rua{int(apply.get('id') or 0)}"
+    log.info("robotaua.card_without_phone", apply=apply.get("id"), name=apply.get("name"))
+    return await _ingest_one(router, fields, stats, dry_run=dry)
+
+
 async def poll_responses(
     *,
     client: RobotaUaClient | None = None,
@@ -833,6 +847,11 @@ async def poll_responses(
                 pass  # phone read out of the uploaded CV — free, no quota spent
             elif await _try_auto_open(client, router, apply, cities, cursor, stats, dry=dry):
                 pass  # opened + ingested in one go
+            elif str(apply.get("resumeType") or "") != "Interaction":
+                # 28.09.2026, the client: every applicant in CRM, phone or not. A real
+                # application whose number stays hidden gets its card now, marked,
+                # instead of waiting out of sight for a paid opening.
+                await _ingest_without_phone(router, apply, cities, stats, dry=dry)
             else:
                 # No CV fetch here on purpose: robota.ua hides the number for
                 # `Interaction` CVs until contacts are opened in the cabinet, and
@@ -869,6 +888,25 @@ async def poll_responses(
             stats.errors += 1
             seen.add(apply_id)
             log.warning("robotaua.apply_failed", apply=apply_id, error=str(e))
+
+    # CV files without a number parked before 28.09 (waiting for a paid opening)
+    # get their cards now. Other parked rows are profile resumes whose phone is
+    # visible — CV-budget leftovers and released applies — and `Interaction`
+    # rows; the probe below keeps handling those.
+    if not blocked:
+        for parked_id, entry in list(pending.items()):
+            if str(entry.get("resume_type") or "") != "AttachedFile":
+                continue
+            try:
+                await _ingest_without_phone(
+                    router, _pending_as_apply(parked_id, entry), cities, stats, dry=dry
+                )
+            except Exception as e:  # noqa: BLE001 — one bad entry must not kill the poll
+                stats.errors += 1
+                log.warning("robotaua.parked_card_failed", apply=parked_id, error=str(e))
+                continue
+            if not dry:
+                pending.pop(parked_id, None)
 
     # ---- 2. parked applies: has anyone opened the contacts since? ---------
     ttl_days = _env_int("ROBOTAUA_PENDING_TTL_DAYS", 30)
