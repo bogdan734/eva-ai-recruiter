@@ -9,9 +9,12 @@ one place; the userbot stays a thin messaging layer.
 """
 from __future__ import annotations
 
+from html import escape as _escape
+
 import structlog
 from sqlalchemy import select
 
+from src.call.line_health import alert_admins
 from src.common import sources
 from src.common.db import session_scope
 from src.common.crm import get_crm
@@ -52,6 +55,53 @@ def _tg_phone(phone: str | None, peer_id: str) -> tuple[str, bool]:
         except Exception:
             pass
     return f"tg{peer_id}"[:20], False
+
+
+def candidate_turns(transcript: str) -> int:
+    """How many times the candidate spoke. The userbot writes "Кандидат: …"; the
+    check used to look for "[Кандидат]" only, so no Telegram-only dialog ever
+    reached a card."""
+    return sum(
+        1 for line in transcript.splitlines()
+        if line.startswith("Кандидат:") or line.startswith("[Кандидат]")
+    )
+
+
+async def _live_lead(kc, lead_id: int | None) -> int | None:
+    """The card id if the card still exists. Recruiters delete cards in the UI;
+    None means "make a new one". A CRM that cannot answer counts as alive — a
+    duplicate card is worse than a transcript that waits for the next message."""
+    if not lead_id:
+        return None
+    try:
+        return lead_id if await kc.card_pipeline(int(lead_id)) is not None else None
+    except Exception as e:  # noqa: BLE001
+        log.warning("tg.card_lookup_failed", lead_id=lead_id, error=str(e))
+        return lead_id
+
+
+def qualified_alert_text(*, name: str, phone: str | None, username: str | None,
+                         lead_id: int | None, region: str | None, age: int | None,
+                         summary: str) -> str:
+    """The recruiters' bot message for someone Eva fully screened in Telegram."""
+    esc = lambda t: _escape(t, quote=False)  # noqa: E731 — Telegram HTML keeps apostrophes
+    who = [f"<b>{esc(name or 'Без імені')}</b>"]
+    if phone:
+        who.append(esc(phone))
+    if username:
+        who.append(esc(f"@{username}"))
+    facts = " · ".join(x for x in (
+        f"Регіон: {esc(region)}" if region else "",
+        f"Вік: {age}" if age else "",
+    ) if x)
+    return "\n".join(x for x in [
+        "✅ <b>Єва відібрала кандидата в Telegram</b>",
+        " · ".join(who),
+        f"Картка #{lead_id} → «В роботі»" if lead_id else "Картку в CRM не створено",
+        facts,
+        esc((summary or "").strip())[:1200],
+        "Уся переписка — у картці.",
+    ] if x)
 
 
 async def handle_tg_outcome(
@@ -115,6 +165,7 @@ async def handle_tg_outcome(
             if region and not cand.region:
                 cand.region = region
         cand_id = cand.id
+        cand_name = cand.full_name
         lead_id = cand.keycrm_lead_id
 
     # --- CRM: create the card if missing, then fill it and move the stage ---
@@ -129,7 +180,11 @@ async def handle_tg_outcome(
         + f"\n{(summary or '')[:1500]}"
     )
     try:
+        old_lead = lead_id
+        lead_id = await _live_lead(kc, lead_id)
         if not lead_id:
+            if old_lead:
+                note += f"\n(попередню картку #{old_lead} видалено в CRM)"
             created = await kc.create_lead(
                 title=name or handle,
                 full_name=name or handle,
@@ -187,6 +242,19 @@ async def handle_tg_outcome(
         log.warning("tg_outcome.crm_failed", error=str(e), candidate_id=cand_id)
         return {"ok": False, "error": f"crm: {e}", "candidate_id": cand_id}
 
+    if verdict == "qualified":
+        # The owner's rule (28.09): the recruiter hears about a Telegram candidate
+        # only once Eva has screened them fully — this is that moment.
+        await alert_admins(qualified_alert_text(
+            name=cand_name or name or handle,
+            phone=phone_key if real_phone else None,
+            username=username,
+            lead_id=lead_id,
+            region=region,
+            age=age,
+            summary=summary,
+        ))
+
     log.info(
         "tg_outcome.done",
         candidate_id=cand_id,
@@ -236,13 +304,17 @@ async def handle_tg_progress(
     try:
         # Already carded → refresh the live transcript on that card (LD_1006). This is
         # also the merge point: a name-matched call card gets the Telegram dialog too.
+        # A card a recruiter deleted counts as none: Eva leads the dialog, and it has
+        # to be visible somewhere.
+        old_lead = lead_id
+        lead_id = await _live_lead(kc, lead_id)
         if lead_id:
             await kc.write_call_results(lead_id, transcript=transcript[:6000])
             return {"ok": True, "lead_id": lead_id}
         # Not carded. Anchor a card so the dialog is visible in CRM 1-to-1 (and survives
         # deletion), but only once the chat is REAL — the candidate answered at least
         # twice — so a bare greeting never spawns a card.
-        if transcript.count("[Кандидат]") < 2:
+        if candidate_turns(transcript) < 2:
             return {"ok": True, "skipped": "dialog_too_short"}
         if cand_id is None:
             async with session_scope() as sess:
@@ -261,7 +333,8 @@ async def handle_tg_progress(
             full_name=name or handle,
             phone=lead_phone,
             vacancy_name=s.default_vacancy_title,
-            manager_comment="Джерело: Telegram — активна переписка",
+            manager_comment="Джерело: Telegram — активна переписка"
+            + (f" (попередню картку #{old_lead} видалено в CRM)" if old_lead else ""),
             status_id=STAGE_MAP.get("call_done", 2),   # 2 Відібрано (pool)
         )
         lead_id = int(created.get("id") or 0) or None
