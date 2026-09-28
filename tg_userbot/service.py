@@ -701,11 +701,10 @@ async def _forward_silenced(peer: str, sender) -> None:
         print(f"[tg-silenced error] {e}", flush=True)
 
 
-async def _should_engage(peer: str, phone: str | None) -> bool:
+async def _gate(peer: str, phone: str | None) -> bool | None:
     """Ask the API whether Eva should still talk to this peer. Once a candidate has
-    been handed to a recruiter (manager_review/interview/closed), the API says no and
-    Eva stays silent. Fail-open on any error — better to answer than to ghost a live
-    candidate over a transient glitch."""
+    been handed to a recruiter (manager_review/interview/closed), the API says no.
+    None when the API could not answer — each caller decides what that means."""
     try:
         params = {"peer": peer}
         if phone:
@@ -718,12 +717,18 @@ async def _should_engage(peer: str, phone: str | None) -> bool:
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as r:
                 if r.status != 200:
-                    return True
+                    return None
                 data = await r.json()
                 return bool(data.get("engage", True))
     except Exception as e:
         print(f"[tg-gate error] {e}", flush=True)
-        return True
+        return None
+
+
+async def _should_engage(peer: str, phone: str | None) -> bool:
+    """Live messages fail open — better to answer than to ghost a candidate who is
+    typing right now over a transient glitch."""
+    return await _gate(peer, phone) is not False
 
 
 @client.on(events.NewMessage(incoming=True))
@@ -859,7 +864,14 @@ async def catch_up_unread(max_dialogs: int = 20, dry_run: bool = False,
                 for text in missed:
                     store.log_message(peer, "user", text)
 
-            if not await _should_engage(peer, store.get_peer_phone(peer)):
+            # The sweep fails CLOSED: it answers old messages, so waiting for the next
+            # one costs little, while answering blind is how Eva re-opened a chat the
+            # owner had decided to close — the API was still starting after a deploy.
+            engage = await _gate(peer, store.get_peer_phone(peer))
+            if engage is None:
+                skipped.append({"peer": peer, "who": who, "why": "gate_unavailable"})
+                continue
+            if not engage:
                 skipped.append({"peer": peer, "who": who, "why": "recruiter_owns"})
                 if not dry_run:
                     await _forward_silenced(peer, sender)
@@ -920,6 +932,25 @@ async def h_catchup(request):
     )
 
 
+async def _wait_for_api(limit_s: float = 120) -> bool:
+    """A deploy restarts the API and the userbot together; sweeping before the API
+    answers makes every gate check come back unknown. Give it a couple of minutes."""
+    deadline = asyncio.get_running_loop().time() + limit_s
+    while True:
+        try:
+            async with aiohttp.ClientSession() as sess:
+                async with sess.get(f"{API_URL}/health",
+                                    timeout=aiohttp.ClientTimeout(total=5)) as r:
+                    if r.status == 200:
+                        return True
+        except Exception:
+            pass
+        if asyncio.get_running_loop().time() >= deadline:
+            print("[catchup@start] API still down — the sweep will skip every chat", flush=True)
+            return False
+        await asyncio.sleep(3)
+
+
 async def main():
     await client.start(phone=PHONE)
     me = await client.get_me()
@@ -931,6 +962,7 @@ async def main():
     # Safety net: whatever landed while we were down never fires on_message, so sweep
     # the unread private chats once we're back up.
     if TG_CATCHUP_ON_START:
+        await _wait_for_api()
         res = await catch_up_unread()
         print(f"[catchup@start] answered={len(res.get('answered') or [])} "
               f"skipped={len(res.get('skipped') or [])}", flush=True)
