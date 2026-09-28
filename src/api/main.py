@@ -215,43 +215,36 @@ async def tg_outcome(
     )
 
 
-# Statuses where a recruiter now owns the candidate — Eva must stop engaging.
-_HANDOFF_STATUSES = {"manager_review", "interview_scheduled", "closed"}
-
-
 @app.get("/internal/tg-gate")
 async def tg_gate(
     peer: str,
     phone: str | None = None,
     x_internal_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Should Eva keep talking to this Telegram peer? Returns engage=False once the
-    candidate has been handed to a recruiter (manager_review / interview / closed),
-    so Eva goes silent instead of re-opening a dialog the recruiter now owns. The
-    candidate is resolved exactly like tg-outcome: real phone if known, else the
-    stable tg<peer> surrogate."""
+    """Should Eva keep talking to this Telegram peer? Decided by the live CRM card
+    (see src/api/tg_gate.py): Eva leads the dialog until a recruiter has the card or
+    it was dispositioned. `notify` says whether the recruiters should get the message
+    Eva is not answering."""
     s = get_settings()
     if x_internal_token != s.internal_api_token:
         raise HTTPException(status_code=401, detail="bad internal token")
-    from sqlalchemy import select
-    from src.common.db import session_scope
-    from src.common.models import Candidate
-    from src.common.phone import normalize_phone
+    from src.api.tg_gate import decide, find_candidate
+    from src.common.crm import get_crm
 
-    keys = [f"tg{peer}"[:20]]
-    if phone:
-        try:
-            norm = normalize_phone(phone)
-            if norm:
-                keys.insert(0, norm)
-        except Exception:
-            pass
-    async with session_scope() as session:
-        cand = (await session.execute(
-            select(Candidate).where(Candidate.phone_e164.in_(keys))
-        )).scalars().first()
-    status = cand.status if cand else None
-    return {"engage": status not in _HANDOFF_STATUSES, "status": status, "found": cand is not None}
+    cand = await find_candidate(peer, phone)
+    kc = get_crm()
+    try:
+        d = await decide(cand, kc)
+    finally:
+        await kc.aclose()
+    return {
+        "engage": d.engage,
+        "notify": d.notify,
+        "why": d.why,
+        "stage": d.stage,
+        "status": cand.status if cand else None,
+        "found": cand is not None,
+    }
 
 
 @app.post("/internal/tg-progress")
