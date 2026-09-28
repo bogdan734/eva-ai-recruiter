@@ -14,6 +14,7 @@ from html import escape as _escape
 import structlog
 from sqlalchemy import select
 
+from src.bot.admin import hiring_paused
 from src.call.line_health import alert_admins
 from src.common import sources
 from src.common.db import session_scope
@@ -38,6 +39,8 @@ _VERDICT_MAP = {
 _IN_WORK = 3
 # Stages where a human has decided: a later chat verdict must not move the card.
 _HUMAN_DECIDED = {4, 10, 30, 5, 32, 33, 34, 82}
+# «Кадровий резерв» — where a qualified candidate goes while hiring is paused.
+_RESERVE = 82
 _REASON_STAGE = {
     "misbehaved": "we_rejected",   # 33 Не підходить нам
     "not_target": "not_target",    # 34 Не ЦА
@@ -88,7 +91,7 @@ async def _live_lead(kc, lead_id: int | None) -> int | None:
 
 def qualified_alert_text(*, name: str, phone: str | None, username: str | None,
                          lead_id: int | None, region: str | None, age: int | None,
-                         summary: str) -> str:
+                         summary: str, reserve: bool = False) -> str:
     """The recruiters' bot message for someone Eva fully screened in Telegram."""
     esc = lambda t: _escape(t, quote=False)  # noqa: E731 — Telegram HTML keeps apostrophes
     who = [f"<b>{esc(name or 'Без імені')}</b>"]
@@ -101,9 +104,11 @@ def qualified_alert_text(*, name: str, phone: str | None, username: str | None,
         f"Вік: {age}" if age else "",
     ) if x)
     return "\n".join(x for x in [
-        "✅ <b>Єва відібрала кандидата в Telegram</b>",
+        "🗂 <b>Єва додала кандидата до кадрового резерву</b>" if reserve
+        else "✅ <b>Єва відібрала кандидата в Telegram</b>",
         " · ".join(who),
-        f"Картка #{lead_id} → «Відібрано»" if lead_id else "Картку в CRM не створено",
+        (f"Картка #{lead_id} → «{'Кадровий резерв' if reserve else 'Відібрано'}»"
+         if lead_id else "Картку в CRM не створено"),
         facts,
         esc((summary or "").strip())[:1200],
         "Уся переписка — у картці.",
@@ -132,6 +137,9 @@ async def handle_tg_outcome(
     if verdict == "not_fit" and reason in _REASON_STAGE:
         stage_key = _REASON_STAGE[reason]
     stage_id = STAGE_MAP.get(stage_key)
+    reserve = verdict == "qualified" and hiring_paused()
+    if reserve:
+        stage_id = _RESERVE
     s = get_settings()
 
     phone_key, real_phone = _tg_phone(phone, peer_id)
@@ -255,6 +263,7 @@ async def handle_tg_outcome(
             region=region,
             age=age,
             summary=summary,
+            reserve=reserve,
         ))
 
     log.info(

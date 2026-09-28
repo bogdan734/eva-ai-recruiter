@@ -213,3 +213,16 @@ def test_verdict_with_bullet_list_summary_is_accepted():
     assert p.summary == "- Досвід менше року\n- Львів"
     assert p.age == 29
     assert p.region == "Львівська"
+
+
+async def test_qualified_while_hiring_is_paused_goes_to_the_reserve(db, crm, alerts, monkeypatch):
+    await _seed(db)
+    fake = crm(alive=True)
+    monkeypatch.setattr(tg_outcome, "hiring_paused", lambda: True)
+
+    await handle_tg_outcome(peer_id="915078090", name="", username=None,
+                            phone="+380671234567", verdict="qualified", region="Львівська",
+                            age=29, summary="- продажі 2 роки", transcript=DIALOG)
+
+    assert fake.moves[-1] == (10559, 82)
+    assert "резерв" in alerts[0]

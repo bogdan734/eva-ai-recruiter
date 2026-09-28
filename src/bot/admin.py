@@ -67,6 +67,13 @@ def calls_paused() -> bool:
     return bool(_state.get("calls_paused"))
 
 
+def hiring_paused() -> bool:
+    """Recruitment is paused (28.09): Eva offers the talent reserve instead of a
+    recruiter's call, and a qualified candidate lands in «Кадровий резерв»."""
+    _load_state()
+    return bool(_state.get("hiring_paused"))
+
+
 def workua_paused() -> bool:
     _load_state()
     return bool(_state.get("workua_paused"))

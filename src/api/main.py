@@ -229,6 +229,7 @@ async def tg_gate(
     if x_internal_token != s.internal_api_token:
         raise HTTPException(status_code=401, detail="bad internal token")
     from src.api.tg_gate import decide, find_candidate
+    from src.bot.admin import hiring_paused
     from src.common.crm import get_crm
 
     cand = await find_candidate(peer, phone)
@@ -244,6 +245,7 @@ async def tg_gate(
         "stage": d.stage,
         "status": cand.status if cand else None,
         "found": cand is not None,
+        "hiring_paused": hiring_paused(),
     }
 
 

@@ -81,3 +81,14 @@ def test_prompt_forbids_inventing_terms_it_does_not_have():
     # nothing in her instructions says so. Terms she was not given go to the recruiter.
     assert "оформлення" in persona.SYSTEM_PROMPT
     assert "розповість рекрутер на співбесіді" in persona.SYSTEM_PROMPT
+
+
+def test_paused_hiring_prompt_offers_the_reserve_not_the_recruiter():
+    # 28.09: hiring is paused — Eva says so and offers the talent reserve instead of
+    # promising a recruiter's call. Switching the flag off gives the plain prompt back.
+    paused = persona.system_prompt("BASE", paused=True)
+
+    assert paused.startswith("BASE")
+    assert "кадрового резерву" in paused
+    assert "НЕ кажи «передаю" in paused
+    assert persona.system_prompt("BASE", paused=False) == "BASE"

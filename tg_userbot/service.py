@@ -28,6 +28,7 @@ from anthropic import Anthropic
 
 import store
 from persona import SYSTEM_PROMPT as _BASE_PROMPT, INTRO_TEMPLATE, incoming_text, is_unseen
+from persona import system_prompt
 
 load_dotenv()
 API_ID = int(os.environ["TG_API_ID"])
@@ -44,6 +45,9 @@ VACANCY_URL = os.environ.get("VACANCY_URL", "https://www.work.ua/jobs/8249916/")
 API_URL = os.environ.get("API_URL", "http://api:8000")
 INTERNAL_API_TOKEN = os.environ.get("INTERNAL_API_TOKEN", "change-me-internal")
 SYSTEM_PROMPT = _BASE_PROMPT.replace("{VACANCY_URL}", VACANCY_URL)
+# Recruitment paused? The API says so with every gate answer (tg-gate), so the
+# switch takes effect on the next message without a restart.
+HIRING_PAUSED = False
 
 # Debounce: coalesce a burst of rapid messages from one peer into a single reply.
 TG_DEBOUNCE_SEC = float(os.environ.get("TG_DEBOUNCE_SEC", "6"))
@@ -719,6 +723,8 @@ async def _gate(peer: str, phone: str | None) -> bool | None:
                 if r.status != 200:
                     return None
                 data = await r.json()
+                global HIRING_PAUSED
+                HIRING_PAUSED = bool(data.get("hiring_paused", False))
                 return bool(data.get("engage", True))
     except Exception as e:
         print(f"[tg-gate error] {e}", flush=True)
@@ -769,7 +775,7 @@ async def on_message(event):
     msgs = store.history(peer)
     try:
         resp = claude.messages.create(model=MODEL, max_tokens=300,
-                                      system=SYSTEM_PROMPT, messages=msgs)
+                                      system=system_prompt(SYSTEM_PROMPT, HIRING_PAUSED), messages=msgs)
         await _report_tokens(resp)
         reply = resp.content[0].text.strip()
     except Exception as e:
@@ -884,7 +890,7 @@ async def catch_up_unread(max_dialogs: int = 20, dry_run: bool = False,
                 msgs = msgs + [{"role": "user", "content": t} for t in missed]
             try:
                 resp = claude.messages.create(model=MODEL, max_tokens=300,
-                                              system=SYSTEM_PROMPT, messages=msgs)
+                                              system=system_prompt(SYSTEM_PROMPT, HIRING_PAUSED), messages=msgs)
                 await _report_tokens(resp)
                 reply = resp.content[0].text.strip()
             except Exception as e:
