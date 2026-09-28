@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class HealthResponse(BaseModel):
@@ -107,6 +108,32 @@ class TgOutcomePayload(BaseModel):
     age: int | None = None
     summary: str = ""
     transcript: str = ""
+
+    # The chat classifier is an LLM asked for "1-2 bullet points": it sometimes
+    # returns a JSON list, an age like "29 років", or a list of regions. A 422 here
+    # used to keep the verdict out of CRM for good, so the shapes are taken as given.
+    @field_validator("summary", mode="before")
+    @classmethod
+    def _summary_as_text(cls, v: Any) -> Any:
+        if isinstance(v, (list, tuple)):
+            items = (str(x).strip().lstrip("-• ").strip() for x in v)
+            return "\n".join(f"- {x}" for x in items if x)
+        return "" if v is None else v
+
+    @field_validator("age", mode="before")
+    @classmethod
+    def _age_as_number(cls, v: Any) -> Any:
+        if v is None or isinstance(v, int):
+            return v
+        m = re.search(r"\d+", str(v))
+        return int(m.group()) if m else None
+
+    @field_validator("region", mode="before")
+    @classmethod
+    def _region_as_text(cls, v: Any) -> Any:
+        if isinstance(v, (list, tuple)):
+            return ", ".join(str(x).strip() for x in v if str(x).strip()) or None
+        return v
 
 
 class TokenUsagePayload(BaseModel):

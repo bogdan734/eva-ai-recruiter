@@ -184,3 +184,17 @@ async def test_not_fit_does_not_ping_the_recruiters(db, crm, alerts):
                             reason="not_target")
 
     assert alerts == []
+
+
+def test_verdict_with_bullet_list_summary_is_accepted():
+    # The classifier is asked for "1-2 bullet points" and sometimes returns them as
+    # a JSON list. The API answered 422 and the verdict never reached the card:
+    # on 28.09 three rejected candidates stayed in «Відібрано» that way.
+    from src.api.schemas import TgOutcomePayload
+
+    p = TgOutcomePayload(peer_id="1", verdict="not_fit", summary=["Досвід менше року", "Львів"],
+                         age="29 років", region=["Львівська"])
+
+    assert p.summary == "- Досвід менше року\n- Львів"
+    assert p.age == 29
+    assert p.region == "Львівська"
