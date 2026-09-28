@@ -29,7 +29,7 @@ def _autocommitting(maker):
 
 
 class _CRM:
-    def __init__(self, stage=3, error=None):
+    def __init__(self, stage=2, error=None):
         self.stage, self.error = stage, error
         self.comments: list[tuple[int, str]] = []
 
@@ -84,12 +84,12 @@ async def _seed(maker, **kw):
 
 def test_alert_names_the_person_the_card_its_stage_and_the_message():
     text = alert_text(name="Фітьо Уляна", username=None, phone="+380671234567",
-                      lead_id=11398, stage=3, messages=["Коли зі мною зв'яжуться?"])
+                      lead_id=11398, stage=2, messages=["Коли зі мною зв'яжуться?"])
 
     assert "Фітьо Уляна" in text
     assert "+380671234567" in text
     assert "#11398" in text
-    assert "«В роботі»" in text
+    assert "«Відібрано»" in text
     assert "«Коли зі мною зв'яжуться?»" in text
 
 
@@ -104,7 +104,7 @@ def test_candidate_text_cannot_break_the_html_message():
 async def test_recruiters_card_gets_the_alert_and_a_comment(db, alerts):
     await _seed(db)
     sent = alerts(2)
-    crm = _CRM(stage=3)
+    crm = _CRM(stage=2)
 
     res = await handle_tg_silenced(peer_id="1142038202", name="", username=None,
                                    phone="+380671234567",
@@ -155,7 +155,7 @@ async def test_nobody_heard_it_is_not_ok(db, alerts):
     alerts(0)
 
     res = await handle_tg_silenced(peer_id="1142038202", name="", username=None,
-                                   phone="+380671234567", messages=["Так"], crm=_CRM(stage=3))
+                                   phone="+380671234567", messages=["Так"], crm=_CRM(stage=2))
 
     assert res["ok"] is False
 

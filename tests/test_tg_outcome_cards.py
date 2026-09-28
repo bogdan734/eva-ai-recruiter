@@ -26,8 +26,8 @@ DIALOG = ("Єва: Доброго дня! Перепрошую за паузу�
 
 
 class _CRM:
-    def __init__(self, alive=True):
-        self.alive = alive
+    def __init__(self, alive=True, live_stage=3):
+        self.alive, self.live_stage = alive, live_stage
         self.created: list[dict] = []
         self.transcripts: list[int] = []
         self.moves: list[tuple[int, int]] = []
@@ -49,7 +49,7 @@ class _CRM:
         self.moves.append((lead_id, status_id))
 
     async def get_card_status(self, lead_id):
-        return 2
+        return self.live_stage
 
     async def find_buyer_by_phone(self, phone):
         return None
@@ -132,6 +132,8 @@ async def test_deleted_card_is_replaced_once_the_dialog_is_real(db, crm):
 
     assert res["created"] is True
     assert fake.created and "#10559" in fake.created[0]["manager_comment"]
+    # Eva is still talking: «В роботі», not a selection (client's rule 02.09)
+    assert fake.created[0]["status_id"] == 3 and fake.moves[-1] == (20001, 3)
     assert await _lead_of(db, cid) == 20001
 
 
@@ -160,7 +162,7 @@ async def test_live_card_gets_the_transcript(db, crm):
 
 async def test_qualified_candidate_goes_to_the_recruiters_bot(db, crm, alerts):
     cid = await _seed(db)
-    crm(alive=False)
+    fake = crm(alive=False)
 
     res = await handle_tg_outcome(peer_id="915078090", name="", username=None,
                                   phone="+380671234567", verdict="qualified",
@@ -172,6 +174,19 @@ async def test_qualified_candidate_goes_to_the_recruiters_bot(db, crm, alerts):
     assert len(alerts) == 1
     assert "Гриценко Анастасія" in alerts[0] and "#20001" in alerts[0]
     assert "Львівська" in alerts[0]
+    assert "«Відібрано»" in alerts[0]
+    assert fake.moves[-1] == (20001, 2)
+
+
+async def test_a_recruiters_decision_is_not_moved_by_a_chat_verdict(db, crm, alerts):
+    await _seed(db)
+    fake = crm(alive=True, live_stage=10)
+
+    await handle_tg_outcome(peer_id="915078090", name="", username=None,
+                            phone="+380671234567", verdict="not_fit", region="Київ",
+                            age=30, summary="- Київ", transcript=DIALOG, reason="not_target")
+
+    assert fake.moves == []
 
 
 async def test_not_fit_does_not_ping_the_recruiters(db, crm, alerts):

@@ -36,15 +36,24 @@ async def test_applicant_whose_card_was_deleted_gets_an_answer():
     assert (d.engage, d.notify, d.why) == (True, False, "card_deleted")
 
 
-async def test_applicant_in_new_or_selected_gets_an_answer():
-    for stage in (1, 2, 31):
+async def test_card_in_evas_own_stages_gets_an_answer():
+    # Новий, В роботі (her unfinished work, client's rule 02.09), Недозвін
+    for stage in (1, 3, 31):
         d = await decide(_cand(), _CRM(stage=stage))
         assert d.engage, stage
 
 
-async def test_card_in_work_with_a_recruiter_keeps_eva_quiet_and_tells_them():
-    d = await decide(_cand(), _CRM(stage=3))
-    assert (d.engage, d.notify, d.why) == (False, True, "recruiter_stage")
+async def test_selected_card_waits_for_the_recruiter_so_eva_is_quiet():
+    # «Відібрано» is Eva's finished selection — a call-qualified person who writes
+    # in Telegram must not be screened again.
+    for stage in (2, 4, 10, 30):
+        d = await decide(_cand(), _CRM(stage=stage))
+        assert (d.engage, d.notify, d.why) == (False, True, "recruiter_stage"), stage
+
+
+async def test_another_funnels_stage_counts_as_the_recruiters():
+    d = await decide(_cand(), _CRM(stage=85))
+    assert (d.engage, d.notify) == (False, True)
 
 
 async def test_rejected_card_keeps_eva_quiet_without_pinging_anyone():
@@ -60,7 +69,7 @@ async def test_closed_candidate_needs_no_crm_call():
 
 
 async def test_evas_own_statuses_need_no_crm_call():
-    crm = _CRM(stage=3)
+    crm = _CRM(stage=2)
     d = await decide(_cand(status="call_done"), crm)
     assert d.engage
     assert crm.asked == 0

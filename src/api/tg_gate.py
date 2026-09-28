@@ -9,10 +9,13 @@ person only once they fully qualify. So the card decides:
 
   * no card, or the card was deleted          → Eva talks (a new card appears
                                                  once the chat is real)
-  * card in Eva's stages (Новий, Відібрано,
-    Недозвін, or her own «В роботі» parking)   → Eva talks
-  * card in a recruiter's stage                → Eva is quiet, recruiters are told
-  * card already dispositioned (Не ЦА, …)      → Eva is quiet, nobody is pinged
+  * Новий, В роботі, Недозвін                  → Eva talks
+  * Відібрано and the recruiter's stages       → Eva is quiet, recruiters are told
+  * already dispositioned (Не ЦА, …)           → Eva is quiet, nobody is pinged
+
+Stage meaning follows the client's rule of 02.09, the same one calls use:
+«Відібрано» is Eva's finished selection waiting for the recruiter, «В роботі»
+is Eva's unfinished work.
 """
 from __future__ import annotations
 
@@ -22,7 +25,6 @@ import structlog
 from sqlalchemy import select
 
 from src.common.db import session_scope
-from src.common.keycrm_fields import crm_stage_stop_status
 from src.common.models import Candidate
 from src.common.phone import normalize_phone
 
@@ -30,6 +32,11 @@ log = structlog.get_logger()
 
 # Statuses where only the card can say whether a human has taken over.
 _ASK_THE_CARD = {"manager_review", "interview_scheduled"}
+
+# Funnel 1 stages. Anything else — another funnel's stage — counts as a
+# recruiter's: quiet and tell them, never guess.
+EVA_WORKING = {1, 3, 31}        # Новий, В роботі (her unfinished work), Недозвін
+FINAL = {5, 32, 33, 34, 82}     # Не підтвердили, Не актуально, Не підходить, Не ЦА, Резерв
 
 
 @dataclass
@@ -63,10 +70,9 @@ async def decide(cand: Candidate | None, crm) -> GateDecision:
         return GateDecision(False, True, "card_unknown")
     if stage is None:
         return GateDecision(True, False, "card_deleted")
-    stop = crm_stage_stop_status(stage, status, cand.callback_at)
-    if stop is None:
+    if stage in EVA_WORKING:
         return GateDecision(True, False, "eva_stage", stage)
-    if stop == "closed":
+    if stage in FINAL:
         return GateDecision(False, False, "final_stage", stage)
     return GateDecision(False, True, "recruiter_stage", stage)
 

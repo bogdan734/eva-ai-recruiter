@@ -18,7 +18,7 @@ from src.call.line_health import alert_admins
 from src.common import sources
 from src.common.db import session_scope
 from src.common.crm import get_crm
-from src.common.keycrm_fields import STAGE_MAP, crm_stage_stop_status
+from src.common.keycrm_fields import STAGE_MAP
 from src.common.models import Candidate, CandidateStatus
 from src.common.phone import normalize_phone
 from src.common.settings import get_settings
@@ -26,12 +26,18 @@ from src.common.settings import get_settings
 log = structlog.get_logger()
 
 # Verdict from the chat classifier -> (our status, CRM stage key).
-# qualified → В роботі (3); not_fit defaults to Не актуально (32). A more specific
-# reason ("misbehaved" → Не підходить 33, "not_target" → Не ЦА 34) overrides below.
+# qualified → Відібрано (2): Eva's finished selection, where the recruiter looks —
+# the client's rule of 02.09, which calls already follow. not_fit defaults to
+# Не актуально (32); a more specific reason ("misbehaved" → Не підходить 33,
+# "not_target" → Не ЦА 34) overrides below.
 _VERDICT_MAP = {
-    "qualified": (CandidateStatus.MANAGER_REVIEW, "manager_review"),
+    "qualified": (CandidateStatus.MANAGER_REVIEW, "call_done"),
     "not_fit": (CandidateStatus.CLOSED, "not_actual"),
 }
+# «В роботі» — Eva's unfinished work; a Telegram dialog in progress lives here.
+_IN_WORK = 3
+# Stages where a human has decided: a later chat verdict must not move the card.
+_HUMAN_DECIDED = {4, 10, 30, 5, 32, 33, 34, 82}
 _REASON_STAGE = {
     "misbehaved": "we_rejected",   # 33 Не підходить нам
     "not_target": "not_target",    # 34 Не ЦА
@@ -97,7 +103,7 @@ def qualified_alert_text(*, name: str, phone: str | None, username: str | None,
     return "\n".join(x for x in [
         "✅ <b>Єва відібрала кандидата в Telegram</b>",
         " · ".join(who),
-        f"Картка #{lead_id} → «В роботі»" if lead_id else "Картку в CRM не створено",
+        f"Картка #{lead_id} → «Відібрано»" if lead_id else "Картку в CRM не створено",
         facts,
         esc((summary or "").strip())[:1200],
         "Уся переписка — у картці.",
@@ -146,9 +152,6 @@ async def handle_tg_outcome(
                     Candidate.phone_e164.like("+%"),
                 ).limit(1)
             )).scalar_one_or_none()
-        # What Eva was doing with this person before the verdict — decides below
-        # whether «В роботі» on the card is hers or a recruiter's.
-        prev_status, prev_callback = None, None
         if cand is None:
             cand = Candidate(
                 full_name=name or handle,
@@ -160,7 +163,6 @@ async def handle_tg_outcome(
             sess.add(cand)
             await sess.flush()
         else:
-            prev_status, prev_callback = cand.status, cand.callback_at
             cand.status = status
             if region and not cand.region:
                 cand.region = region
@@ -214,7 +216,7 @@ async def handle_tg_outcome(
             # transcript, not drag the card back into Eva's funnel.
             if stage_id is not None:
                 live_stage = await kc.get_card_status(lead_id)
-                if crm_stage_stop_status(live_stage, prev_status, prev_callback) is not None:
+                if live_stage in _HUMAN_DECIDED:
                     log.info(
                         "tg_outcome.stage_kept",
                         lead_id=lead_id, live_stage=live_stage, wanted=stage_id,
@@ -335,7 +337,7 @@ async def handle_tg_progress(
             vacancy_name=s.default_vacancy_title,
             manager_comment="Джерело: Telegram — активна переписка"
             + (f" (попередню картку #{old_lead} видалено в CRM)" if old_lead else ""),
-            status_id=STAGE_MAP.get("call_done", 2),   # 2 Відібрано (pool)
+            status_id=_IN_WORK,   # Eva is still talking — not a selection yet
         )
         lead_id = int(created.get("id") or 0) or None
         if lead_id:
@@ -348,9 +350,9 @@ async def handle_tg_progress(
                 await kc.assign_manager(lead_id, s.keycrm_ai_manager_id)
             # KeyCRM ignores the create-time status_id when the card is created ON a
             # buyer (contact.client_id) — it drops into "Новий". Move it explicitly
-            # into the "Відібрано" pool, the same PUT-based pattern the call
-            # orchestrator and handle_tg_outcome already rely on.
-            await kc.move_to_status(lead_id, STAGE_MAP.get("call_done", 2))
+            # into «В роботі», the same PUT-based pattern the call orchestrator and
+            # handle_tg_outcome already rely on.
+            await kc.move_to_status(lead_id, _IN_WORK)
         return {"ok": True, "lead_id": lead_id, "created": True}
     except Exception as e:
         log.warning("tg_progress.crm_failed", error=str(e), lead_id=lead_id)
