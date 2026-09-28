@@ -74,3 +74,10 @@ def test_prompt_tells_eva_what_each_placeholder_means():
     for placeholder in ("[голосове повідомлення]", "[відеоповідомлення]", "[стікер]",
                         "[фото]", "[файл]"):
         assert placeholder in persona.SYSTEM_PROMPT
+
+
+def test_prompt_forbids_inventing_terms_it_does_not_have():
+    # 28.09 Eva told a candidate "офіційне влаштування за трудовим договором" —
+    # nothing in her instructions says so. Terms she was not given go to the recruiter.
+    assert "оформлення" in persona.SYSTEM_PROMPT
+    assert "розповість рекрутер на співбесіді" in persona.SYSTEM_PROMPT
