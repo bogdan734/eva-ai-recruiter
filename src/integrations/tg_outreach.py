@@ -22,13 +22,19 @@ import httpx
 import structlog
 from sqlalchemy import select
 
+from src.common.crm import get_crm
 from src.common.db import session_scope
+from src.common.keycrm_fields import crm_stage_stop_status
 from src.common.models import Candidate
 from src.common.settings import get_settings
 
 log = structlog.get_logger()
 
 KIND = "applied_no_contact"
+
+# A recruiter has already decided about these people. On 26.09 the walker wrote
+# "we never reached you" to someone rejected as «Не ЦА» the day before.
+_DECIDED = {"closed", "interview_scheduled"}
 
 # Errors that will never succeed on a retry. Marking these done is not giving
 # up — it is the difference between a queue that drains and one that jams on the
@@ -66,6 +72,39 @@ async def pending_candidates(
     return [(r[0], r[1] or "", r[2]) for r in rows]
 
 
+async def _card_facts(ids: list[int]) -> dict[int, tuple]:
+    """candidate id -> (status, callback_at, keycrm_lead_id)."""
+    async with session_scope() as s:
+        rows = (
+            await s.execute(
+                select(Candidate.id, Candidate.status, Candidate.callback_at,
+                       Candidate.keycrm_lead_id)
+                .where(Candidate.id.in_(ids))
+            )
+        ).all()
+    return {r[0]: (r[1], r[2], r[3]) for r in rows}
+
+
+async def skip_reason(crm, *, status, callback_at, lead_id: int | None) -> str | None:
+    """Why this person must not get the message, or None to send it.
+
+    Asks KeyCRM for the live stage: our own status lags behind a recruiter's moves
+    (a card rejected in the CRM stays `manager_review` here). Raises when KeyCRM
+    cannot answer — nobody is written to on a guess.
+    """
+    status = str(getattr(status, "value", status) or "")
+    if status in _DECIDED:
+        return f"status:{status}"
+    if not lead_id:
+        return None
+    stage = await crm.live_card_status(int(lead_id))
+    if stage is None:
+        return "card_deleted"
+    if crm_stage_stop_status(stage, status, callback_at) is not None:
+        return f"crm_stage:{stage}"
+    return None
+
+
 async def _mark_sent(candidate_id: int) -> None:
     async with session_scope() as s:
         row = (
@@ -82,6 +121,7 @@ async def run_once(
     limit: int = 100,
     send: bool = False,
     on_event=None,
+    crm=None,
 ) -> OutreachStats:
     """One pass. Stops the moment the userbot says it has had enough for today."""
     people = await pending_candidates(vacancy, created_after, limit)
@@ -89,9 +129,44 @@ async def run_once(
     if not people or not send:
         return stats
 
+    facts = await _card_facts([p[0] for p in people])
+    kc = crm or get_crm()
     url = f"{get_settings().tguserbot_url}/send_outreach"
+    try:
+        await _walk(people, facts=facts, kc=kc, url=url, stats=stats, on_event=on_event)
+    finally:
+        if crm is None:
+            await kc.aclose()
+
+    log.info(
+        "tg_outreach.run",
+        vacancy=vacancy,
+        pending=stats.pending,
+        sent=stats.sent,
+        skipped=stats.skipped,
+        stopped_on=stats.stopped_on,
+    )
+    return stats
+
+
+async def _walk(people, *, facts, kc, url, stats: OutreachStats, on_event) -> None:
     async with httpx.AsyncClient(timeout=90) as http:
         for cid, name, phone in people:
+            status, callback_at, lead_id = facts.get(cid, (None, None, None))
+            try:
+                why = await skip_reason(kc, status=status, callback_at=callback_at,
+                                        lead_id=lead_id)
+            except Exception as e:  # noqa: BLE001 — KeyCRM unreachable: keep them pending
+                stats.stopped_on = f"keycrm: {e}"[:120]
+                break
+            if why:
+                await _mark_sent(cid)
+                stats.skipped += 1
+                log.info("tg_outreach.skip", candidate_id=cid, reason=why)
+                if on_event:
+                    on_event("skipped", name, why)
+                continue
+
             try:
                 r = await http.post(url, json={"phone": phone, "name": name, "kind": KIND})
                 data = r.json()
@@ -119,16 +194,6 @@ async def run_once(
             if on_event:
                 on_event("stopped", name, err)
             break
-
-    log.info(
-        "tg_outreach.run",
-        vacancy=vacancy,
-        pending=stats.pending,
-        sent=stats.sent,
-        skipped=stats.skipped,
-        stopped_on=stats.stopped_on,
-    )
-    return stats
 
 
 def configured_start() -> datetime | None:

@@ -303,6 +303,19 @@ class KeyCRMClient:
             log.warning("keycrm.get_card_status_failed", error=str(e), lead_id=lead_id)
             return None
 
+    async def live_card_status(self, lead_id: int) -> int | None:
+        """Stage of a card when a guess is not good enough: None only when the card
+        is gone (404). Any other failure raises — unlike get_card_status, which
+        reads an outage as "no card" too."""
+        r = await self._get_rate_limited(f"/pipelines/cards/{lead_id}")
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        sid = (r.json() or {}).get("status_id")
+        if sid is None:
+            raise ValueError(f"card {lead_id} came back without status_id")
+        return int(sid)
+
     async def card_pipeline(self, lead_id: int) -> int | None:
         """Which funnel this card is in, or None if it no longer exists.
 
