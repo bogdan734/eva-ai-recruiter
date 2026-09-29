@@ -289,9 +289,19 @@ async def disposition_stale_unreachable() -> None:
             )).scalars().all()
             for cand in rows:
                 cand.status = CandidateStatus.CLOSED
-                if cand.keycrm_lead_id:
-                    await kc.move_to_status(cand.keycrm_lead_id, STAGE_MAP.get("not_actual", 32))
                 moved += 1
+                if not cand.keycrm_lead_id:
+                    continue
+                # One card per call, each on its own: a card a recruiter deleted by
+                # hand answers 404, and letting that raise rolled the whole batch back
+                # every morning -- «Недозвін» never drained from 18.09 to 29.09.
+                try:
+                    await kc.move_to_status(cand.keycrm_lead_id, STAGE_MAP.get("not_actual", 32))
+                except Exception as e:  # noqa: BLE001 — the local close stands either way
+                    log.warning(
+                        "scheduler.unreachable_giveup_card_failed lead=%s error=%s",
+                        cand.keycrm_lead_id, str(e)[:120],
+                    )
     finally:
         await kc.aclose()
     if moved:
@@ -667,6 +677,7 @@ def build_scheduler() -> AsyncIOScheduler:
         trigger=CronTrigger(hour=8, minute=30, timezone=s.app_timezone),
         id="unreachable_giveup",
         replace_existing=True,
+        misfire_grace_time=3600,
     )
     # Cold sourcing: search work.ua's resume database for people who never
     # applied anywhere, so Єва's call queue has someone to dial even on a day

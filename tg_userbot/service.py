@@ -28,7 +28,7 @@ from anthropic import Anthropic
 
 import store
 from persona import SYSTEM_PROMPT as _BASE_PROMPT, INTRO_TEMPLATE, incoming_text, is_unseen
-from persona import system_prompt
+from persona import system_prompt, closing_mode, ends_on_candidate
 
 load_dotenv()
 API_ID = int(os.environ["TG_API_ID"])
@@ -705,10 +705,11 @@ async def _forward_silenced(peer: str, sender) -> None:
         print(f"[tg-silenced error] {e}", flush=True)
 
 
-async def _gate(peer: str, phone: str | None) -> bool | None:
-    """Ask the API whether Eva should still talk to this peer. Once a candidate has
-    been handed to a recruiter (manager_review/interview/closed), the API says no.
-    None when the API could not answer — each caller decides what that means."""
+async def _gate_decision(peer: str, phone: str | None) -> dict | None:
+    """Ask the API whether Eva should still talk to this peer: its whole answer
+    (engage, why, stage…). Once a candidate has been handed to a recruiter
+    (manager_review/interview/closed), engage is false. None when the API could not
+    answer — each caller decides what that means."""
     try:
         params = {"peer": peer}
         if phone:
@@ -725,16 +726,10 @@ async def _gate(peer: str, phone: str | None) -> bool | None:
                 data = await r.json()
                 global HIRING_PAUSED
                 HIRING_PAUSED = bool(data.get("hiring_paused", False))
-                return bool(data.get("engage", True))
+                return data
     except Exception as e:
         print(f"[tg-gate error] {e}", flush=True)
         return None
-
-
-async def _should_engage(peer: str, phone: str | None) -> bool:
-    """Live messages fail open — better to answer than to ghost a candidate who is
-    typing right now over a transient glitch."""
-    return await _gate(peer, phone) is not False
 
 
 @client.on(events.NewMessage(incoming=True))
@@ -767,15 +762,21 @@ async def on_message(event):
 
     # Once a recruiter owns this candidate (handed off), Eva stays silent. The
     # incoming message is already stored above; the recruiters get it instead.
-    if not await _should_engage(peer, store.get_peer_phone(peer)):
+    # Live messages fail open: a glitch must not ghost someone typing right now.
+    # Someone Eva turned down herself still gets an answer (see closing_mode).
+    decision = await _gate_decision(peer, store.get_peer_phone(peer))
+    closing = closing_mode(decision, store.last_outcome(peer),
+                           replies_since=store.replies_since_outcome(peer))
+    if decision is not None and not decision.get("engage", True) and not closing:
         print(f"[tg-gate] silent — recruiter owns peer={peer}", flush=True)
         await _forward_silenced(peer, sender)
         return
 
-    msgs = store.history(peer)
+    msgs = ends_on_candidate(store.history(peer), text)
     try:
         resp = claude.messages.create(model=MODEL, max_tokens=300,
-                                      system=system_prompt(SYSTEM_PROMPT, HIRING_PAUSED), messages=msgs)
+                                      system=system_prompt(SYSTEM_PROMPT, HIRING_PAUSED, closed=closing),
+                                      messages=msgs)
         await _report_tokens(resp)
         reply = resp.content[0].text.strip()
     except Exception as e:
@@ -786,11 +787,17 @@ async def on_message(event):
     if _peer_seq.get(peer) != token:
         return
     await human_typing(sender, reply)
+    # They wrote again while Eva was typing: this reply no longer answers the
+    # conversation, the newer handler answers all of it.
+    if _peer_seq.get(peer) != token:
+        return
     await event.respond(reply)
     store.log_message(peer, "assistant", reply)
-    await _push_progress(peer, sender, store.history(peer))
-    await report_outcome_if_ready(peer, sender, store.history(peer))
-    print(f"[{getattr(sender, 'first_name', peer)}] {text[:50]!r} -> {reply[:50]!r}", flush=True)
+    if not closing:  # a verdict already stands; closing replies do not reopen it
+        await _push_progress(peer, sender, store.history(peer))
+        await report_outcome_if_ready(peer, sender, store.history(peer))
+    print(f"[{getattr(sender, 'first_name', peer)}] {text[:50]!r} -> {reply[:50]!r}"
+          + (" (closing)" if closing else ""), flush=True)
 
 
 # How stale a dialogue may be and still be answered by the automatic sweep.
@@ -875,11 +882,13 @@ async def catch_up_unread(max_dialogs: int = 20, dry_run: bool = False,
             # The sweep fails CLOSED: it answers old messages, so waiting for the next
             # one costs little, while answering blind is how Eva re-opened a chat the
             # owner had decided to close — the API was still starting after a deploy.
-            engage = await _gate(peer, store.get_peer_phone(peer))
-            if engage is None:
+            decision = await _gate_decision(peer, store.get_peer_phone(peer))
+            if decision is None:
                 skipped.append({"peer": peer, "who": who, "why": "gate_unavailable"})
                 continue
-            if not engage:
+            closing = closing_mode(decision, store.last_outcome(peer),
+                                   replies_since=store.replies_since_outcome(peer))
+            if not decision.get("engage", True) and not closing:
                 skipped.append({"peer": peer, "who": who, "why": "recruiter_owns"})
                 if not dry_run:
                     await _forward_silenced(peer, sender)
@@ -890,7 +899,8 @@ async def catch_up_unread(max_dialogs: int = 20, dry_run: bool = False,
                 msgs = msgs + [{"role": "user", "content": t} for t in missed]
             try:
                 resp = claude.messages.create(model=MODEL, max_tokens=300,
-                                              system=system_prompt(SYSTEM_PROMPT, HIRING_PAUSED), messages=msgs)
+                                              system=system_prompt(SYSTEM_PROMPT, HIRING_PAUSED, closed=closing),
+                                              messages=msgs)
                 await _report_tokens(resp)
                 reply = resp.content[0].text.strip()
             except Exception as e:
@@ -914,8 +924,9 @@ async def catch_up_unread(max_dialogs: int = 20, dry_run: bool = False,
             store.log_message(peer, "assistant", reply)
             try:
                 await client.send_read_acknowledge(dialog.entity)
-                await _push_progress(peer, sender, store.history(peer))
-                await report_outcome_if_ready(peer, sender, store.history(peer))
+                if not closing:
+                    await _push_progress(peer, sender, store.history(peer))
+                    await report_outcome_if_ready(peer, sender, store.history(peer))
             except Exception as e:  # bookkeeping only — the reply is already delivered
                 print(f"[catchup post-send] {who}: {e}", flush=True)
             print(f"[catchup] {who} <- {reply[:60]!r}", flush=True)

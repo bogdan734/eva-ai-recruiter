@@ -156,9 +156,53 @@ PAUSED_NOTE = """
 """
 
 
-def system_prompt(base: str, paused: bool) -> str:
-    """Eva's prompt, with the paused-hiring note when recruitment is on hold."""
-    return base + PAUSED_NOTE if paused else base
+CLOSED_NOTE = """
+
+ЗАРАЗ: ти вже сказала цьому кандидату, що він не підходить на вакансію, а він написав
+знову. Це важливіше за інструкції вище:
+- Відповідай одним коротким теплим повідомленням по суті його питання.
+- Відбір не відновлюй і нових питань не став; рішення не змінюється.
+- Не пояснюй критерії відбору (регіон, вік тощо).
+- Можна сказати, що нові вакансії з'являються і, якщо з'явиться відповідна, з ним звʼяжуться.
+"""
+
+# How many times Eva answers someone after turning them down herself.
+CLOSING_REPLIES = 2
+
+
+def system_prompt(base: str, paused: bool, closed: bool = False) -> str:
+    """Eva's prompt, with the paused-hiring note when recruitment is on hold and the
+    closing note when she is answering someone she has already turned down."""
+    return base + (PAUSED_NOTE if paused else "") + (CLOSED_NOTE if closed else "")
+
+
+def closing_mode(decision: dict | None, outcome: str | None, *, replies_since: int,
+                 limit: int = CLOSING_REPLIES) -> bool:
+    """Eva turned this person down herself and they wrote again: she answers instead
+    of going silent (28.09: two candidates asked "why not?" into silence for a day).
+    A recruiter's own decision (a final stage) still keeps her quiet."""
+    return (
+        decision is not None
+        and decision.get("why") == "closed"
+        and outcome == "not_fit"
+        and replies_since < limit
+    )
+
+
+def ends_on_candidate(msgs: list[dict], text: str) -> list[dict]:
+    """The history to answer `text` from, ending on the candidate.
+
+    A message that arrives while Eva is typing is stored before her reply, so the
+    history ends on Eva -- and the model, given nothing to answer, returned nothing
+    (28.09 "[claude error] list index out of range"): the message went unanswered.
+    Her reply was written without it, so it goes after.
+    """
+    if not msgs or msgs[-1]["role"] != "assistant":
+        return msgs
+    for i in range(len(msgs) - 2, -1, -1):
+        if msgs[i]["role"] == "user" and msgs[i]["content"] == text:
+            return msgs[:i] + msgs[i + 1:] + [msgs[i]]
+    return msgs
 
 
 # Our timestamps and Telegram's come from different clocks.

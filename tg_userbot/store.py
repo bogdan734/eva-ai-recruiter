@@ -129,6 +129,21 @@ def last_outcome(peer: str) -> str | None:
     return row[0] if row else None
 
 
+def replies_since_outcome(peer: str) -> int:
+    """Eva's messages to this peer after the verdict was recorded."""
+    import datetime as _dt
+    c = _conn()
+    row = c.execute("SELECT ts FROM outcomes WHERE peer=?", (peer,)).fetchone()
+    if not row or not row[0]:
+        c.close()
+        return 0
+    since = _dt.datetime.fromisoformat(row[0]).replace(tzinfo=_dt.timezone.utc).timestamp()
+    n = c.execute("SELECT COUNT(*) FROM messages WHERE peer=? AND role='assistant' AND ts>?",
+                  (peer, since)).fetchone()[0]
+    c.close()
+    return int(n)
+
+
 def set_outcome(peer: str, verdict: str) -> None:
     import datetime as _dt
     c = _conn()

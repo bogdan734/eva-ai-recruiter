@@ -101,6 +101,23 @@ def _callback_moment(summary, tz) -> datetime:
     return nxt.replace(hour=11, minute=0, second=0, microsecond=0)
 
 
+def _potential_fit_plan(summary, tz) -> tuple["CandidateStatus", datetime | None, str | None]:
+    """Talked, looks promising, screening unfinished: (status, callback_at, chat kind).
+
+    A callback the candidate asked for is a promise Eva made on the phone, so it is
+    kept; otherwise the screening moves to Telegram.
+    """
+    if _wants_callback(summary):
+        return CandidateStatus.IN_CALL_QUEUE, _callback_moment(summary, tz), None
+    return CandidateStatus.CALL_DONE, None, "collect_info"
+
+
+def _chat_fallback(summary, tz) -> tuple["CandidateStatus", datetime]:
+    """The chat meant to finish the screening did not go out (no Telegram on the
+    number): ring back instead of leaving the card in «В роботі» with nobody on it."""
+    return CandidateStatus.IN_CALL_QUEUE, _callback_moment(summary, tz)
+
+
 def _activity_note(
     *,
     calls_total: int,
@@ -705,12 +722,15 @@ class CallOrchestrator:
                 getattr(summary, "potentially_fit", False)
                 and summary.spoke_with_candidate
             ):
-                # Talked, looks promising, but region/age not finished. Do not redial —
-                # finish it in Telegram. Eva is still working this one, so it sits
-                # in «В роботі» rather than among the people she has settled on.
-                candidate.status = CandidateStatus.CALL_DONE
+                # Talked, looks promising, but region/age not finished. Finish it in
+                # Telegram -- unless they asked to be called back. Eva is still working
+                # this one either way, so it sits in «В роботі».
+                candidate.status, callback_at, needs_tg_outreach = _potential_fit_plan(
+                    summary, ZoneInfo(self._settings.app_timezone)
+                )
+                if callback_at is not None:
+                    candidate.callback_at = callback_at
                 new_stage = STAGE_MAP.get("manager_review")    # 3 В роботі
-                needs_tg_outreach = "collect_info"
             elif getattr(summary, "time_waster", False) or reason == "misbehaved":
                 # Rude / trolling / bad conduct → Не підходить нам.
                 candidate.status = CandidateStatus.CLOSED
@@ -800,6 +820,12 @@ class CallOrchestrator:
                     )
             except Exception as e:
                 log.warning("orchestrator.tg_outreach_failed", error=str(e))
+            if needs_tg_outreach == "collect_info" and not tg_sent:
+                candidate.status, candidate.callback_at = _chat_fallback(
+                    summary, ZoneInfo(self._settings.app_timezone)
+                )
+                log.info("orchestrator.chat_unreachable_callback",
+                         candidate_id=candidate.id, at=str(candidate.callback_at))
 
 
         # Deferred-KeyCRM mode: create the lead now that we have a
