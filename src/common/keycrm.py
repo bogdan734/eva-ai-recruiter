@@ -460,6 +460,21 @@ class KeyCRMClient:
         r.raise_for_status()
         return r.json() if r.text else {}
 
+    async def set_activity_line(self, lead_id: int, line: str) -> None:
+        """Put Eva's activity line at the top of the card's «AI Summary», keeping
+        what is written under it."""
+        from src.common.activity import with_activity
+
+        card = await self.get_lead(lead_id, include="custom_fields")
+        current = next(
+            (f.get("value") for f in card.get("custom_fields") or []
+             if f.get("uuid") == FIELD_AI_SUMMARY),
+            None,
+        )
+        await self.update_lead(lead_id, {"custom_fields": [
+            {"uuid": FIELD_AI_SUMMARY, "value": with_activity(current, line)[:8000]}
+        ]})
+
     async def move_to_status(self, lead_id: int, status_id: int) -> dict[str, Any]:
         return await self.update_lead(lead_id, {"status_id": status_id})
 

@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from src.common.activity import activity_line, tg_failed_note, tg_sent_note, with_activity
+
 import httpx
 import structlog
 import os
@@ -820,6 +822,10 @@ class CallOrchestrator:
                     )
             except Exception as e:
                 log.warning("orchestrator.tg_outreach_failed", error=str(e))
+            if tg_sent:
+                candidate.tg_note = tg_sent_note(datetime.now(ZoneInfo(self._settings.app_timezone)))
+            elif tg_failed_note(tg_error):
+                candidate.tg_note = tg_failed_note(tg_error)
             if needs_tg_outreach == "collect_info" and not tg_sent:
                 candidate.status, candidate.callback_at = _chat_fallback(
                     summary, ZoneInfo(self._settings.app_timezone)
@@ -904,7 +910,13 @@ class CallOrchestrator:
                 )
                 await self._keycrm.write_call_results(
                     candidate.keycrm_lead_id,
-                    summary=summary.summary,
+                    # The note below never reaches an existing card (KeyCRM drops
+                    # later edits), so what Eva did opens the summary instead.
+                    summary=with_activity(summary.summary, activity_line(
+                        calls=calls_total,
+                        talked_sec=max(talked_sec, int(duration_sec or 0)),
+                        tg_note=candidate.tg_note,
+                    )),
                     transcript=transcript,
                     audio_url=playable,
                     region=candidate.region,

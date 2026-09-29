@@ -91,6 +91,10 @@ class Candidate(Base):
     outreach_sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # What Eva did in Telegram, in the words the card shows: "написала 29.09",
+    # "листувалась", "не вдалося написати — немає в Telegram". outreach_sent_at
+    # cannot say it: the walker also sets it for people it skipped.
+    tg_note: Mapped[str | None] = mapped_column(String(80), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

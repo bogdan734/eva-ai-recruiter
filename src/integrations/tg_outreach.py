@@ -22,6 +22,7 @@ import httpx
 import structlog
 from sqlalchemy import select
 
+from src.common.activity import line_for, tg_failed_note, tg_sent_note
 from src.common.crm import get_crm
 from src.common.db import session_scope
 from src.common.keycrm_fields import crm_stage_stop_status
@@ -114,6 +115,22 @@ async def _mark_sent(candidate_id: int) -> None:
             row.outreach_sent_at = datetime.now(UTC)
 
 
+async def _note_tg(kc, cid: int, lead_id: int | None, note: str) -> None:
+    """Remember what happened in Telegram and show it on the lead card. Bookkeeping:
+    a failure here must never stop the walk."""
+    try:
+        async with session_scope() as s:
+            row = (
+                await s.execute(select(Candidate).where(Candidate.id == cid))
+            ).scalar_one_or_none()
+            if row:
+                row.tg_note = note
+        if lead_id:
+            await kc.set_activity_line(int(lead_id), await line_for(cid))
+    except Exception as e:  # noqa: BLE001 — the message went out, the card can wait
+        log.warning("tg_outreach.activity_failed", candidate_id=cid, error=str(e))
+
+
 async def run_once(
     *,
     vacancy: str = "sales",
@@ -176,6 +193,7 @@ async def _walk(people, *, facts, kc, url, stats: OutreachStats, on_event) -> No
 
             if data.get("ok"):
                 await _mark_sent(cid)
+                await _note_tg(kc, cid, lead_id, tg_sent_note(datetime.now(UTC)))
                 stats.sent += 1
                 if on_event:
                     on_event("sent", name, "")
@@ -184,6 +202,8 @@ async def _walk(people, *, facts, kc, url, stats: OutreachStats, on_event) -> No
             err = str(data.get("error") or "")[:120]
             if any(token in err for token in _PERMANENT):
                 await _mark_sent(cid)
+                if tg_failed_note(err):
+                    await _note_tg(kc, cid, lead_id, tg_failed_note(err))
                 stats.skipped += 1
                 if on_event:
                     on_event("skipped", name, err)

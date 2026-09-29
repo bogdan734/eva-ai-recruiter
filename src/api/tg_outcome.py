@@ -17,6 +17,7 @@ from sqlalchemy import select
 from src.bot.admin import hiring_paused
 from src.call.line_health import alert_admins
 from src.common import sources
+from src.common.activity import TG_CHATTED, line_for, with_activity
 from src.common.db import session_scope
 from src.common.crm import get_crm
 from src.common.keycrm_fields import STAGE_MAP
@@ -74,6 +75,34 @@ def candidate_turns(transcript: str) -> int:
         1 for line in transcript.splitlines()
         if line.startswith("Кандидат:") or line.startswith("[Кандидат]")
     )
+
+
+async def _line(cand_id: int | None) -> str | None:
+    """Eva's activity line for the card; None if it cannot be worked out right now."""
+    if not cand_id:
+        return None
+    try:
+        return await line_for(cand_id)
+    except Exception as e:  # noqa: BLE001 — the card is still worth writing without it
+        log.warning("tg.activity_line_failed", candidate_id=cand_id, error=str(e))
+        return None
+
+
+async def _mark_chatted(kc, cand_id: int | None, lead_id: int | None) -> None:
+    """The lead card says Eva is talking to this person in Telegram — once."""
+    if not cand_id or not lead_id:
+        return
+    try:
+        async with session_scope() as sess:
+            c = await sess.get(Candidate, cand_id)
+            if c is None or c.tg_note == TG_CHATTED:
+                return
+            c.tg_note = TG_CHATTED
+        line = await _line(cand_id)
+        if line:
+            await kc.set_activity_line(lead_id, line)
+    except Exception as e:  # noqa: BLE001 — bookkeeping, the chat goes on
+        log.warning("tg.activity_card_failed", lead_id=lead_id, error=str(e))
 
 
 async def _live_lead(kc, lead_id: int | None) -> int | None:
@@ -174,6 +203,7 @@ async def handle_tg_outcome(
             cand.status = status
             if region and not cand.region:
                 cand.region = region
+        cand.tg_note = TG_CHATTED
         cand_id = cand.id
         cand_name = cand.full_name
         lead_id = cand.keycrm_lead_id
@@ -208,9 +238,10 @@ async def handle_tg_outcome(
                 if c and lead_id:
                     c.keycrm_lead_id = lead_id
         if lead_id:
+            line = await _line(cand_id)
             await kc.write_call_results(
                 lead_id,
-                summary=summary,
+                summary=with_activity(summary, line) if line else summary,
                 transcript=transcript,
                 region=region,
                 age=age,
@@ -321,6 +352,7 @@ async def handle_tg_progress(
         lead_id = await _live_lead(kc, lead_id)
         if lead_id:
             await kc.write_call_results(lead_id, transcript=transcript[:6000])
+            await _mark_chatted(kc, cand_id, lead_id)
             return {"ok": True, "lead_id": lead_id}
         # Not carded. Anchor a card so the dialog is visible in CRM 1-to-1 (and survives
         # deletion), but only once the chat is REAL — the candidate answered at least
@@ -355,6 +387,7 @@ async def handle_tg_progress(
                 if c:
                     c.keycrm_lead_id = lead_id
             await kc.write_call_results(lead_id, transcript=transcript[:6000])
+            await _mark_chatted(kc, cand_id, lead_id)
             if s.keycrm_ai_manager_id:
                 await kc.assign_manager(lead_id, s.keycrm_ai_manager_id)
             # KeyCRM ignores the create-time status_id when the card is created ON a
