@@ -73,8 +73,10 @@ CANDIDATE_URL = "https://robota.ua/candidates/{resume_id}"
 # Same cabinet, but the "review this response" view for one specific
 # application (apply id, not resume id) -- what a recruiter actually
 # lands on clicking an apply from robota.ua's own applies list. Used for
-# every vacancy apply, since those always carry an apply id.
-APPLY_REVIEW_URL = "https://robota.ua/my/vacancies/all/applies?id={apply_id}-prof"
+# every vacancy apply, since those always carry an apply id. The suffix names
+# the kind of resume: "prof" for a robota.ua profile, "attach" for a sent file;
+# the other one answers "Candidate was not found" (checked 29.09).
+APPLY_REVIEW_URL = "https://robota.ua/my/vacancies/all/applies?id={apply_id}-{kind}"
 # CV file of an `AttachedFile` apply. Those have resumeId=0, so /resume/{id}
 # can never return them — the file is attached to the apply itself. The apply
 # payload carries this exact URL in `filePath`; the template is the fallback.
@@ -690,6 +692,39 @@ def build_resume_text(apply: dict, resume: dict | None = None) -> str:
     return "\n".join(parts).strip()
 
 
+def apply_review_url(apply_id, resume_type) -> str | None:
+    if not apply_id:
+        return None
+    kind = "attach" if str(resume_type or "") == "AttachedFile" else "prof"
+    return APPLY_REVIEW_URL.format(apply_id=apply_id, kind=kind)
+
+
+NAMELESS = "Кандидат robota.ua"
+# Words people put in a CV file name that are not their name.
+_FILE_NOISE = {
+    "cv", "resume", "résumé", "резюме", "резюмe", "анкета", "final", "new", "copy",
+    "копія", "копия", "doc", "docx", "pdf", "img", "scan", "скан", "photo", "фото",
+    "file", "файл", "document", "документ", "updated", "eng", "ukr", "ua", "en", "ru",
+}
+
+
+def name_from_file_name(file_name: str | None) -> str | None:
+    """Who sent the CV, going by its file name -- for the rare apply without a
+    name: someone not registered on robota.ua sends only a file, and then the
+    cabinet's own name field is empty (1 of 240 applies on 29.09)."""
+    stem = str(file_name or "")
+    while True:
+        base, dot, ext = stem.rpartition(".")
+        if not dot or not re.fullmatch(r"[A-Za-z0-9]{1,5}(\s*\(\d+\))?\s*", ext):
+            break
+        stem = base
+    words = re.sub(r"\(\d+\)|[_\-.,]+|\d+", " ", stem).split()
+    words = [w for w in words if w.lower() not in _FILE_NOISE]
+    if not 2 <= len(words) <= 3 or not all(re.fullmatch(r"[^\W\d_]+(['’][^\W\d_]+)?", w) for w in words):
+        return None
+    return " ".join(w[:1].upper() + w[1:].lower() for w in words)
+
+
 def parse_apply(
     apply: dict,
     *,
@@ -713,7 +748,9 @@ def parse_apply(
         "apply_id": int(apply.get("id") or 0),
         "resume_id": resume_id,
         "vacancy_id": apply.get("vacancyId"),
-        "full_name": (apply.get("name") or "Кандидат robota.ua").strip(),
+        "full_name": (apply.get("name") or "").strip()
+        or name_from_file_name(apply.get("fileName"))
+        or NAMELESS,
         "phone_raw": phone,
         "email": email or None,
         "city": (geo or {}).get("city"),
@@ -724,7 +761,7 @@ def parse_apply(
             resume.get("experiences") or apply.get("experiences")
         ),
         "resume_text": build_resume_text(apply, resume),
-        "resume_url": APPLY_REVIEW_URL.format(apply_id=apply.get("id")) if apply.get("id") else None,
+        "resume_url": apply_review_url(apply.get("id"), apply.get("resumeType")),
         "applied_at": apply.get("addDate"),
         "resume_type": apply.get("resumeType"),
         # robota.ua knows a number exists but keeps it behind "open contacts".

@@ -25,7 +25,7 @@ def _apply(**kw) -> dict:
 def test_resume_url_uses_apply_id_not_resume_id_in_new_format():
     fields = parse_apply(_apply())
     assert fields["resume_url"] == (
-        "https://robota.ua/my/vacancies/all/applies?id=92348749-prof"
+        "https://robota.ua/my/vacancies/all/applies?id=92348749-attach"
     )
     # the old candidate-id-based link must not appear anywhere in it
     assert "26145663" not in fields["resume_url"]
@@ -43,5 +43,32 @@ def test_resume_url_uses_apply_id_even_for_attached_file_with_zero_resume_id():
     # exists regardless, so the new link must still be built.
     fields = parse_apply(_apply(id=92355425, resumeId=0))
     assert fields["resume_url"] == (
-        "https://robota.ua/my/vacancies/all/applies?id=92355425-prof"
+        "https://robota.ua/my/vacancies/all/applies?id=92355425-attach"
     )
+
+
+def test_resume_url_suffix_follows_the_kind_of_resume():
+    # 29.09: the cabinet addresses an apply as "{id}-prof" when the person
+    # applied with a robota.ua profile resume and "{id}-attach" when they sent
+    # a file. "-prof" on a file apply opens "Candidate was not found".
+    assert parse_apply(_apply(id=1, resumeType="Notepad"))["resume_url"].endswith("?id=1-prof")
+    assert parse_apply(_apply(id=2, resumeType="AttachedFile"))["resume_url"].endswith("?id=2-attach")
+    assert parse_apply(_apply(id=3, resumeType=None))["resume_url"].endswith("?id=3-prof")
+
+
+def test_nameless_file_apply_is_named_after_the_cv_file():
+    # An unregistered applicant sends only a file; robota.ua then has no name.
+    fields = parse_apply(_apply(name="", resumeType="AttachedFile",
+                                fileName="Merve galuzynska (3).pdf (16).pdf"))
+    assert fields["full_name"] == "Merve Galuzynska"
+
+
+def test_generic_cv_file_name_is_not_taken_for_a_name():
+    for file_name in ("CV.pdf", "Резюме (2).docx", "resume_final_2026.pdf", "IMG_2044.jpg", None):
+        fields = parse_apply(_apply(name="", fileName=file_name))
+        assert fields["full_name"] == "Кандидат robota.ua", file_name
+
+
+def test_name_from_robota_ua_wins_over_the_file_name():
+    fields = parse_apply(_apply(name="Наталья Денисюк", fileName="Денисюк Наталья Вікторівна 4 (1).docx"))
+    assert fields["full_name"] == "Наталья Денисюк"
