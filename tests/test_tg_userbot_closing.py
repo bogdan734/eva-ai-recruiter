@@ -36,6 +36,12 @@ def test_eva_answers_after_turning_someone_down_herself():
     assert persona.closing_mode({"engage": False, "why": "closed"}, "not_fit", replies_since=0)
 
 
+def test_and_after_the_deadline_closed_the_vacancy_for_them():
+    # 29.09: "answer by 14:50, after that the vacancy is closed" — a late reply
+    # gets the closing answer, not silence.
+    assert persona.closing_mode({"engage": False, "why": "closed"}, "closed", replies_since=0)
+
+
 def test_but_only_a_couple_of_times():
     assert not persona.closing_mode({"engage": False, "why": "closed"}, "not_fit", replies_since=2)
 
