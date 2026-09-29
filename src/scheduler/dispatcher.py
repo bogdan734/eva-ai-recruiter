@@ -104,15 +104,26 @@ def dialable_candidates_query(s):
             # call no longer blocks a legitimate retry. NULL (calls finalized
             # before this flag was persisted) is treated as "unknown" and does
             # not block, same as everywhere else this flag is missing.
-            (
-                select(func.count(Call.id))
-                .where(
-                    Call.candidate_id == Candidate.id,
-                    Call.duration_sec >= REAL_CONTACT_SEC,
-                    Call.spoke_with_candidate.is_(True),
-                )
-                .scalar_subquery()
-            ) == 0,
+            #
+            # A due callback is the exception: the person asked to be rung back
+            # (a bad line, "call me in half an hour"), so a real conversation
+            # before it is the reason to call, not a reason to stop. 29.09: two
+            # promised callbacks sat in «В роботі» for a week behind this guard.
+            or_(
+                and_(
+                    Candidate.callback_at.is_not(None),
+                    Candidate.callback_at <= func.now(),
+                ),
+                (
+                    select(func.count(Call.id))
+                    .where(
+                        Call.candidate_id == Candidate.id,
+                        Call.duration_sec >= REAL_CONTACT_SEC,
+                        Call.spoke_with_candidate.is_(True),
+                    )
+                    .scalar_subquery()
+                ) == 0,
+            ),
         )
         .order_by(Candidate.match_score.desc().nulls_last(), Candidate.created_at)
         .limit(s.call_max_concurrent)

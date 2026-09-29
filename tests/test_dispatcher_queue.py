@@ -171,3 +171,41 @@ async def test_short_call_never_blocks_regardless_of_screening_flag(session):
     await session.commit()
 
     assert cand.id in await _dialable_ids(session, _settings())
+
+
+@pytest.mark.asyncio
+async def test_a_due_callback_is_dialled_even_after_a_real_conversation(session):
+    """29.09: "bad line, call me in half an hour" after 87 seconds of real
+    screening (Тимків), and a call cut mid-screening (Долгош). The real-contact
+    guard kept both out of the queue for good, so the callback they asked for
+    never came. A callback that is due is an explicit request -- it gets dialled."""
+    from datetime import datetime, timedelta
+
+    cand = _candidate(phone_e164="+380990000009", call_attempts=2,
+                      callback_at=datetime.utcnow() - timedelta(minutes=5))
+    session.add(cand)
+    await session.flush()
+    session.add(Call(
+        candidate_id=cand.id, attempt_number=1, status=CallStatus.HANGUP,
+        duration_sec=87, spoke_with_candidate=True,
+    ))
+    await session.flush()
+
+    assert cand.id in await _dialable_ids(session, _FakeSettings(call_max_attempts=2))
+
+
+@pytest.mark.asyncio
+async def test_a_callback_not_yet_due_still_waits(session):
+    from datetime import datetime, timedelta
+
+    cand = _candidate(phone_e164="+380990000010", call_attempts=1,
+                      callback_at=datetime.utcnow() + timedelta(hours=3))
+    session.add(cand)
+    await session.flush()
+    session.add(Call(
+        candidate_id=cand.id, attempt_number=1, status=CallStatus.HANGUP,
+        duration_sec=87, spoke_with_candidate=True,
+    ))
+    await session.flush()
+
+    assert cand.id not in await _dialable_ids(session, _settings())
