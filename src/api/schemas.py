@@ -155,6 +155,13 @@ class TgProgressPayload(BaseModel):
     transcript: str = ""
 
 
+class TgSilencePayload(BaseModel):
+    """A chat where the candidate went quiet: "check", "close" or "reopen" its card."""
+    peer_id: str
+    phone: str | None = None
+    action: str
+
+
 class TgSilencedPayload(BaseModel):
     """A candidate wrote while the tg-gate kept Eva quiet — what they wrote since
     Eva's last message, oldest first, for the recruiters to answer."""

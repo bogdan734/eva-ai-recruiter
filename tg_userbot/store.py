@@ -24,6 +24,9 @@ def _conn():
     # quiet — so a restart or a second sweep does not ping them twice for it.
     c.execute("""CREATE TABLE IF NOT EXISTS silenced_alerts(
         peer TEXT PRIMARY KEY, msg_id INTEGER, ts REAL)""")
+    # A chat that went quiet: when Eva reminded, when the card was let go.
+    c.execute("""CREATE TABLE IF NOT EXISTS nudges(
+        peer TEXT PRIMARY KEY, reminded_at REAL, closed_at REAL)""")
     return c
 
 
@@ -175,3 +178,50 @@ def get_peer_phone(peer: str) -> str | None:
     row = c.execute("SELECT phone FROM peer_phone WHERE peer=?", (peer,)).fetchone()
     c.close()
     return row[0] if row else None
+
+
+def silent_dialogs(*, older_than: float, newer_than: float) -> list[tuple[str, float]]:
+    """Chats where Eva spoke last, between these two moments, longest silence first.
+    Whether a chat is Eva's to chase is the card's call (only «В роботі» is): the
+    message she writes after a call to finish the screening may never get an answer."""
+    c = _conn()
+    rows = c.execute(
+        "SELECT m.peer, m.ts FROM messages m "
+        "JOIN (SELECT peer, MAX(id) AS id FROM messages WHERE TRIM(text)<>'' GROUP BY peer) last "
+        "ON m.id = last.id "
+        "WHERE m.role='assistant' AND m.ts < ? AND m.ts > ? ORDER BY m.ts",
+        (older_than, newer_than),
+    ).fetchall()
+    c.close()
+    return [(str(p), float(t)) for p, t in rows]
+
+
+def nudge_state(peer: str) -> tuple[float | None, float | None]:
+    """(reminded_at, closed_at) of the current silence, or (None, None)."""
+    c = _conn()
+    row = c.execute("SELECT reminded_at, closed_at FROM nudges WHERE peer=?", (peer,)).fetchone()
+    c.close()
+    return (row[0], row[1]) if row else (None, None)
+
+
+def mark_reminded(peer: str) -> None:
+    c = _conn()
+    c.execute("INSERT INTO nudges(peer,reminded_at,closed_at) VALUES(?,?,NULL) "
+              "ON CONFLICT(peer) DO UPDATE SET reminded_at=excluded.reminded_at, closed_at=NULL",
+              (peer, time.time()))
+    c.commit(); c.close()
+
+
+def mark_silence_closed(peer: str) -> None:
+    c = _conn()
+    c.execute("INSERT INTO nudges(peer,reminded_at,closed_at) VALUES(?,NULL,?) "
+              "ON CONFLICT(peer) DO UPDATE SET closed_at=excluded.closed_at",
+              (peer, time.time()))
+    c.commit(); c.close()
+
+
+def clear_nudge(peer: str) -> None:
+    """The candidate spoke: whatever silence was being counted is over."""
+    c = _conn()
+    c.execute("DELETE FROM nudges WHERE peer=?", (peer,))
+    c.commit(); c.close()

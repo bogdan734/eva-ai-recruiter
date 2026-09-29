@@ -18,6 +18,7 @@ from .schemas import (
     VapiWebhookPayload,
     TgOutcomePayload,
     TgProgressPayload,
+    TgSilencePayload,
     TgSilencedPayload,
     TokenUsagePayload,
     WorkUaInboundPayload,
@@ -265,6 +266,23 @@ async def tg_progress(
         username=payload.username,
         phone=payload.phone,
         transcript=payload.transcript,
+    )
+
+
+@app.post("/internal/tg-silence")
+async def tg_silence(
+    payload: TgSilencePayload,
+    x_internal_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """A candidate stopped answering Eva: may she remind them, and when to let the
+    «В роботі» card go (or take it back when they write again)."""
+    s = get_settings()
+    if x_internal_token != s.internal_api_token:
+        raise HTTPException(status_code=401, detail="bad internal token")
+    from src.api.tg_silence import handle_tg_silence
+
+    return await handle_tg_silence(
+        peer_id=payload.peer_id, phone=payload.phone, action=payload.action
     )
 
 

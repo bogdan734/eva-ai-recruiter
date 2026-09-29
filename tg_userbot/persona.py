@@ -207,6 +207,35 @@ def ends_on_candidate(msgs: list[dict], text: str) -> list[dict]:
     return msgs
 
 
+# A chat that went quiet (the owner's rule of 29.09): one reminder after two silent
+# days, the «В роботі» card goes to «Не актуально» three days after that.
+REMIND_AFTER_S = 48 * 3600
+CLOSE_AFTER_S = 72 * 3600
+
+REMINDER_TEXT = (
+    "Доброго дня! Нагадую про себе 🙂 Чи ще актуальна для вас вакансія менеджера "
+    "з продажу в Козир Транс? Якщо так — дайте відповідь на моє попереднє питання, "
+    "і продовжимо."
+)
+
+
+def silence_step(*, last_role: str, last_ts: float, reminded_at: float | None,
+                 closed_at: float | None, now: float,
+                 remind_after: float = REMIND_AFTER_S,
+                 close_after: float = CLOSE_AFTER_S) -> str | None:
+    """"remind", "close" or None for a chat, from who spoke last and when."""
+    if last_role != "assistant" or closed_at:
+        return None
+    if reminded_at is None:
+        return "remind" if now - last_ts >= remind_after else None
+    return "close" if now - reminded_at >= close_after else None
+
+
+def nudge_hours(now_kyiv) -> bool:
+    """Reminders go out Monday to Saturday, 10:00-19:00 Kyiv time."""
+    return now_kyiv.weekday() < 6 and 10 <= now_kyiv.hour < 19
+
+
 # Our timestamps and Telegram's come from different clocks.
 _CLOCK_SLACK_S = 5.0
 

@@ -14,7 +14,9 @@
 import asyncio
 import json
 import os
+import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import random
 
 import aiohttp
@@ -29,6 +31,7 @@ from anthropic import Anthropic
 import store
 from persona import SYSTEM_PROMPT as _BASE_PROMPT, INTRO_TEMPLATE, incoming_text, is_unseen
 from persona import system_prompt, closing_mode, ends_on_candidate
+from persona import REMINDER_TEXT, REMIND_AFTER_S, nudge_hours, silence_step
 
 load_dotenv()
 API_ID = int(os.environ["TG_API_ID"])
@@ -484,6 +487,7 @@ def build_web_app() -> web.Application:
         web.post("/toggle", h_toggle),
         web.post("/limit", h_limit),
         web.post("/catchup", h_catchup),
+        web.post("/nudge", h_nudge),
         web.get("/outreach_stats", h_outreach_stats),
     ])
     return app
@@ -705,6 +709,33 @@ async def _forward_silenced(peer: str, sender) -> None:
         print(f"[tg-silenced error] {e}", flush=True)
 
 
+async def _silence_api(peer: str, action: str) -> dict | None:
+    """Ask the API about a quiet chat's card: "check", "close" or "reopen"."""
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(
+                f"{API_URL}/internal/tg-silence",
+                json={"peer_id": peer, "phone": store.get_peer_phone(peer), "action": action},
+                headers={"X-Internal-Token": INTERNAL_API_TOKEN},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as r:
+                return await r.json(content_type=None) if r.status == 200 else None
+    except Exception as e:
+        print(f"[tg-silence error] {action} peer={peer}: {e}", flush=True)
+        return None
+
+
+async def _reopen_if_silenced(peer: str) -> None:
+    """Someone whose card went to «Не актуально» for silence wrote back: the card
+    returns to «В роботі» and Eva carries on, instead of the gate keeping her quiet."""
+    if store.last_outcome(peer) != "silent":
+        return
+    res = await _silence_api(peer, "reopen")
+    if res and res.get("reopened"):
+        store.set_outcome(peer, "reopened")
+        print(f"[silence] reopened peer={peer}", flush=True)
+
+
 async def _gate_decision(peer: str, phone: str | None) -> dict | None:
     """Ask the API whether Eva should still talk to this peer: its whole answer
     (engage, why, stage…). Once a candidate has been handed to a recruiter
@@ -748,6 +779,7 @@ async def on_message(event):
     if not text:  # nothing to read or answer (location, contact card, service message)
         return
     store.log_message(peer, "user", text)
+    store.clear_nudge(peer)
 
     # Debounce: if the candidate fires several messages in a row, wait for the
     # burst to settle and reply ONCE. Each incoming message bumps the peer token;
@@ -764,6 +796,7 @@ async def on_message(event):
     # incoming message is already stored above; the recruiters get it instead.
     # Live messages fail open: a glitch must not ghost someone typing right now.
     # Someone Eva turned down herself still gets an answer (see closing_mode).
+    await _reopen_if_silenced(peer)
     decision = await _gate_decision(peer, store.get_peer_phone(peer))
     closing = closing_mode(decision, store.last_outcome(peer),
                            replies_since=store.replies_since_outcome(peer))
@@ -878,6 +911,9 @@ async def catch_up_unread(max_dialogs: int = 20, dry_run: bool = False,
             if not dry_run:
                 for text in missed:
                     store.log_message(peer, "user", text)
+                if missed:
+                    store.clear_nudge(peer)
+                await _reopen_if_silenced(peer)
 
             # The sweep fails CLOSED: it answers old messages, so waiting for the next
             # one costs little, while answering blind is how Eva re-opened a chat the
@@ -937,6 +973,86 @@ async def catch_up_unread(max_dialogs: int = 20, dry_run: bool = False,
     return {"ok": True, "dry_run": dry_run, "answered": answered, "skipped": skipped}
 
 
+KYIV = ZoneInfo("Europe/Kyiv")
+NUDGE_EVERY_S = int(os.environ.get("TG_NUDGE_EVERY_S", "1800"))
+# Chats quiet for longer than this are not reminded: that silence predates the rule.
+NUDGE_MAX_AGE_S = 14 * 24 * 3600
+NUDGE_MAX_CHECKS = 40                 # card look-ups per pass; the rest wait for the next
+_nudge_skip: dict[str, float] = {}   # peer -> until when the card said "not yours"
+
+
+async def nudge_silent_dialogs(dry_run: bool = False, limit: int = 10) -> dict:
+    """One pass of the silence rule: remind after two quiet days, let the «В роботі»
+    card go three days after the reminder. Cards anywhere else are not touched."""
+    if not STATE.get("active", True):
+        return {"ok": False, "error": "paused"}
+    now = time.time()
+    if not dry_run and not nudge_hours(datetime.now(KYIV)):
+        return {"ok": True, "skipped": "outside_hours"}
+    done: list[dict] = []
+    checks = 0
+    for peer, last_ts in store.silent_dialogs(older_than=now - REMIND_AFTER_S,
+                                              newer_than=now - NUDGE_MAX_AGE_S):
+        if len(done) >= limit or checks >= NUDGE_MAX_CHECKS:
+            break
+        if peer in TG_ADMIN_PEERS or _nudge_skip.get(peer, 0) > now:
+            continue
+        reminded_at, closed_at = store.nudge_state(peer)
+        step = silence_step(last_role="assistant", last_ts=last_ts,
+                            reminded_at=reminded_at, closed_at=closed_at, now=now)
+        if step is None:
+            continue
+        if step == "remind":
+            checks += 1
+            res = await _silence_api(peer, "check")
+            await asyncio.sleep(1)   # each check is a KeyCRM read (~60/min allowed)
+            if not res or not res.get("eligible"):
+                _nudge_skip[peer] = now + 6 * 3600
+                continue
+            if dry_run:
+                done.append({"peer": peer, "step": "remind", "stage": res.get("stage")})
+                continue
+            try:
+                entity = await client.get_input_entity(int(peer))
+                await human_typing(entity, REMINDER_TEXT)
+                await client.send_message(entity, REMINDER_TEXT)
+            except Exception as e:
+                print(f"[silence] remind failed peer={peer}: {e}", flush=True)
+                _nudge_skip[peer] = now + 6 * 3600
+                continue
+            store.log_message(peer, "assistant", REMINDER_TEXT)
+            store.mark_reminded(peer)
+            done.append({"peer": peer, "step": "remind"})
+        else:
+            if dry_run:
+                done.append({"peer": peer, "step": "close"})
+                continue
+            res = await _silence_api(peer, "close")
+            if not res:
+                continue
+            store.mark_silence_closed(peer)   # closed, or the card moved on — stop counting
+            if res.get("closed"):
+                store.set_outcome(peer, "silent")
+            done.append({"peer": peer, "step": "close", "closed": bool(res.get("closed"))})
+        print(f"[silence] {done[-1]}", flush=True)
+        await asyncio.sleep(5)
+    return {"ok": True, "dry_run": dry_run, "done": done}
+
+
+async def _nudge_loop() -> None:
+    while True:
+        try:
+            await nudge_silent_dialogs()
+        except Exception as e:  # one bad pass must not end the rule
+            print(f"[silence] pass failed: {e}", flush=True)
+        await asyncio.sleep(NUDGE_EVERY_S)
+
+
+async def h_nudge(request):
+    dry = request.query.get("dry") in ("1", "true", "yes")
+    return web.json_response(await nudge_silent_dialogs(dry_run=dry))
+
+
 async def h_outreach_stats(request):
     return web.json_response(store.outreach_stats(int(request.query.get("days", 30))))
 
@@ -985,6 +1101,7 @@ async def main():
         res = await catch_up_unread()
         print(f"[catchup@start] answered={len(res.get('answered') or [])} "
               f"skipped={len(res.get('skipped') or [])}", flush=True)
+    asyncio.create_task(_nudge_loop())
     await client.run_until_disconnected()
 
 
