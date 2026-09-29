@@ -54,6 +54,10 @@ def _status(cand: Candidate | None) -> str:
 
 async def decide(cand: Candidate | None, crm) -> GateDecision:
     """engage: Eva answers. notify: Eva is quiet and a recruiter should read it."""
+    from src.bot.admin import calls_paused
+
+    if calls_paused():  # Eva is stopped (/pause): people get a human instead
+        return GateDecision(False, True, "paused")
     if cand is None:
         return GateDecision(True, False, "unknown_person")
     status = _status(cand)

@@ -146,8 +146,10 @@ async def cmd_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         _state["calls_paused"] = True
         _save_state()
         await u.message.reply_text(
-            "⏸ Пауза: дзвінки, холодний пошук, розсилка в Telegram і платні відкриття "
-            "контактів зупинені. Відгуки з сайтів і далі падають у CRM. `/resume` — запустити."
+            "⏸ Єву зупинено: не дзвонить і не приймає дзвінки, не відповідає в Telegram "
+            "і в чаті robota.ua, не шукає й не відкриває контакти. Повідомлення кандидатів "
+            "у Telegram пересилаються сюди. Відгуки з сайтів і далі падають у CRM. "
+            "`/resume` — увімкнути Єву."
         )
     await _guarded(update, ctx, _do)
 
@@ -156,7 +158,8 @@ async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     async def _do(u, c):
         _state["calls_paused"] = False
         _save_state()
-        await u.message.reply_text("🟢 Дзвінки, пошук, розсилка й відкриття контактів активні.")
+        await u.message.reply_text("🟢 Єва знову працює: дзвінки, Telegram, чат robota.ua, "
+                                   "пошук і відкриття контактів.")
     await _guarded(update, ctx, _do)
 
 
@@ -544,8 +547,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "`/params` — налаштування .env\n"
         "`/report` — згенерувати звіт зараз\n\n"
         "⏸ Контроль:\n"
-        "`/pause` — зупинити дзвінки, пошук, розсилку й платні відкриття\n"
-        "`/resume` — продовжити\n"
+        "`/pause` — зупинити Єву: дзвінки, Telegram, чат robota.ua, пошук, відкриття\n"
+        "`/resume` — увімкнути Єву\n"
         "`/pause_hiring` — набір на паузі: Єва пропонує кадровий резерв\n"
         "`/resume_hiring` — звичайний набір\n"
         "`/pause_workua` — зупинити пуллер work.ua\n"

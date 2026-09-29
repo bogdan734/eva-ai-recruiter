@@ -465,6 +465,10 @@ async def _maybe_reply(
     """
     if not _env_flag("ROBOTAUA_CHAT_REPLY_ENABLED", "0"):
         return False
+    from src.bot.admin import calls_paused
+
+    if calls_paused():  # Eva is stopped (/pause)
+        return False
     if entry.get("replied_at"):
         return False
     if stats.replies_sent >= _env_int("ROBOTAUA_CHAT_REPLIES_PER_RUN", 2):

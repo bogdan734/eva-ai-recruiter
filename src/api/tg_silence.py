@@ -37,6 +37,10 @@ async def _set_status(cand_id: int, status: CandidateStatus) -> None:
 
 async def handle_tg_silence(*, peer_id: str, phone: str | None, action: str, crm=None) -> dict:
     """action: "check" (may Eva remind?), "close" (let the card go), "reopen"."""
+    from src.bot.admin import calls_paused
+
+    if calls_paused():  # Eva is stopped: no reminders, no closing, no reopening
+        return {"ok": True, "eligible": False, "closed": False, "reopened": False, "why": "paused"}
     cand = await find_candidate(peer_id, phone)
     if cand is None or not cand.keycrm_lead_id:
         return {"ok": True, "eligible": False, "closed": False, "reopened": False, "why": "no_card"}

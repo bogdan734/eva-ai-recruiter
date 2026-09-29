@@ -49,6 +49,11 @@ _HANDOFF_STATUSES = {"manager_review", "interview_scheduled", "closed"}
 
 # Spoken to a handed-off candidate who calls in. Ends with "Гарного дня!" so Eva's
 # existing endCallPhrases hang up right after the line (maxDurationSeconds is a backstop).
+# Eva is stopped (/pause): whoever calls hears this and the call ends — no screening.
+_PAUSED_INBOUND_LINE = (
+    "Доброго дня! Дякуємо за дзвінок у Козир Транс. Зараз набір на вакансію "
+    "призупинено, тож провести співбесіду я не можу. Гарного дня!"
+)
 _HANDOFF_INBOUND_LINE = (
     "Доброго дня! Дякую за дзвінок. Вашу заявку вже передано рекрутеру — "
     "він найближчим часом звʼяжеться з вами, щоб узгодити деталі. Гарного дня!"
@@ -63,6 +68,18 @@ async def handle_assistant_request(payload: VapiWebhookPayload) -> dict[str, Any
     s = get_settings()
     eva = s.vapi_assistant_id
     caller = payload.customer_phone or ""
+    from src.bot.admin import calls_paused
+
+    if calls_paused():
+        log.info("vapi.assistant_request.paused", caller=caller)
+        return {
+            "assistantId": eva,
+            "assistantOverrides": {
+                "firstMessage": _PAUSED_INBOUND_LINE,
+                "firstMessageMode": "assistant-speaks-first",
+                "maxDurationSeconds": 20,
+            },
+        }
     try:
         from sqlalchemy import select
 

@@ -90,7 +90,7 @@ def apply_saved_overrides() -> None:
 # ------------------------------- keyboards --------------------------------
 
 def _main_kb() -> InlineKeyboardMarkup:
-    calls_lbl = "▶️ Зняти паузу" if calls_paused() else "⏸ Пауза (дзвінки, пошук, розсилка)"
+    calls_lbl = "▶️ Увімкнути Єву" if calls_paused() else "⏸ Зупинити Єву"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📞 Тестовий дзвінок", callback_data="call:new")],
         [InlineKeyboardButton("🎯 Критерії кандидатів", callback_data="nav:crit")],

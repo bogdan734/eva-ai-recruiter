@@ -40,6 +40,7 @@ def alert_text(
     lead_id: int | None,
     stage: int | None,
     messages: list[str],
+    paused: bool = False,
 ) -> str:
     """The recruiters' message. Everything from the candidate is escaped: the bot
     sends HTML, and one stray "<" would make Telegram reject the whole alert."""
@@ -48,6 +49,17 @@ def alert_text(
         who.append(escape(phone))
     if username:
         who.append(escape(f"@{username}"))
+    if paused:
+        return "\n".join([
+            "💬 <b>Кандидат написав Єві в Telegram — Єва на паузі</b>",
+            " · ".join(who),
+            *([f"Картка #{lead_id}"] if lead_id else []),
+            "",
+            *(f"«{escape(m)}»" for m in messages),
+            "",
+            "Єва зараз зупинена й не відповідає. Відповісти можна з акаунта Єви "
+            "в Telegram або подзвонити.",
+        ])
     where = (f"Картка #{lead_id} · етап «{_STAGE_UA.get(stage, stage)}»" if stage
              else f"Картка #{lead_id} · етап не вдалося перевірити в CRM")
     return "\n".join([
@@ -92,6 +104,7 @@ async def handle_tg_silenced(
             lead_id=lead_id,
             stage=d.stage,
             messages=said,
+            paused=d.why == "paused",
         ))
         if lead_id and d.stage:
             try:
