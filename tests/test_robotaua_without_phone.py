@@ -100,6 +100,19 @@ async def test_a_real_application_parked_earlier_gets_its_card_on_the_next_poll(
     assert set(rs.load_cursor()["pending"]) == {"10"}
 
 
+async def test_a_parked_application_keeps_its_email_on_the_card():
+    # 29.09: the parked queue kept the name but not the email, so the six cards
+    # built from it on 28.09 had no way to reach the person at all.
+    apply = {"id": 11, "name": "Karina Dorohii", "vacancyId": SALES_ID, "resumeId": 0,
+             "resumeType": "AttachedFile", "phone": "", "eMail": "karina@example.com"}
+    rs.save_cursor({"pending": {"11": rs._parked_entry(apply)}})
+    router = _Router()
+
+    await rs.poll_responses(client=_Cabinet([]), router=router)
+
+    assert [p.email for p in router.payloads] == ["karina@example.com"]
+
+
 # ---- the intake side: a card with no phone ----------------------------------
 
 class _CRM:

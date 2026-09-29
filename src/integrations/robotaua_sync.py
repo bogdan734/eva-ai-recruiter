@@ -421,6 +421,8 @@ def _parked_entry(apply: dict) -> dict:
     return {
         "resume_id": int(apply.get("resumeId") or 0),
         "name": (apply.get("name") or "").strip(),
+        # The only way to reach someone whose number robota.ua hides.
+        "email": (apply.get("eMail") or apply.get("email") or "").strip() or None,
         "vacancy_id": apply.get("vacancyId"),
         "resume_type": apply.get("resumeType"),
         # Kept so a later maintenance pass can rank the backlog for
@@ -501,6 +503,7 @@ def _pending_as_apply(apply_id: str, entry: dict) -> dict:
     return {
         "id": int(apply_id),
         "name": entry.get("name"),
+        "eMail": entry.get("email"),
         "vacancyId": entry.get("vacancy_id"),
         "cityId": entry.get("city_id"),
         "speciality": entry.get("speciality"),
